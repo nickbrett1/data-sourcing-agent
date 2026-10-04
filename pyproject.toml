@@ -6,7 +6,18 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic-ai>=2.40",
-    "fasta2a[pydantic-ai]>=2.0",
+    # The A2A server. Pinned to the SAME version the LiteLLM gateway invokes us
+    # with (litellm 1.105.0 -> a2a-sdk 1.1.0). Version skew between client and
+    # server was the original defect (FastA2A 2.0.1 declared a 1.0 interface but
+    # spoke the 0.3 wire); using the official SDK on both sides removes it by
+    # construction, and pinning keeps it removed.
+    "a2a-sdk==1.1.0",
+    # The HTTP surface for the SDK server (`create_jsonrpc_routes` /
+    # `create_agent_card_routes` are Starlette routes; the dispatcher streams
+    # via sse-starlette). Declared explicitly because `fasta2a`, which used to
+    # pull them in, is gone.
+    "starlette>=0.37",
+    "sse-starlette>=2.0",
     "uvicorn>=0.30",
     "httpx>=0.27"
 ]

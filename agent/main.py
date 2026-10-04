@@ -4,9 +4,16 @@ Run it with:
 
     uvicorn agent.main:app --host 0.0.0.0 --port 8700
 
-The A2A app, agent card and JSON-RPC transport come from FastA2A; this module
-wires a Pydantic AI agent into it. Startup self-registration with the LiteLLM
-gateway lives in agent/register.py.
+The A2A app, agent card and JSON-RPC transport come from the **official
+a2a-sdk** (`a2a.server`); this module wires a Pydantic AI agent into it. Startup
+self-registration with the LiteLLM gateway lives in agent/register.py.
+
+Why a2a-sdk and not FastA2A: the LiteLLM gateway invokes this agent with an
+a2a-sdk 1.1.0 client, and FastA2A 2.0.1 could not be spoken to by it - its card
+declared a "1.0" interface while the server only spoke the 0.3 wire, and its
+`result.task` envelope was unparseable by the client. Using the same SDK on both
+sides of the wire removes the skew by construction. `a2a-sdk` is pinned to the
+gateway's client version (pyproject).
 
 Bind 0.0.0.0, not 127.0.0.1: the caller is the LiteLLM proxy reaching this
 container across the network, so a loopback bind is unreachable.
@@ -19,29 +26,38 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fasta2a import FastA2A
-from fasta2a.broker import InMemoryBroker
-from fasta2a.pydantic_ai import worker_lifespan
-from fasta2a.storage import InMemoryStorage
+from a2a.helpers.proto_helpers import new_task_from_user_message, new_text_part
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events.event_queue import EventQueue
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.server.tasks.task_updater import TaskUpdater
 from pydantic_ai import Agent, ModelSettings, PromptedOutput
 from pydantic_ai.mcp import MCPToolset
+from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from agent.card import AGENT_SKILLS
+from agent.card import AGENT_SKILLS, build_agent_card
 from agent.contract import validate_agent_result
-from agent.headers import HeaderForwardingWorker, LiteLLMHeaderMiddleware
+from agent.headers import capture_litellm_headers
 from agent.model import build_model
 from agent.register import register_with_litellm
-from agent.ticket import TicketProposal
+from agent.ticket import TicketProposal, render_ticket_yaml
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 INSTRUCTIONS_PATH = PACKAGE_ROOT.parent / "prompts" / "instructions.md"
 
 AGENT_NAME = "data-sourcing-agent"
 AGENT_DESCRIPTION = "Turns a fuzzy market-data need into a validated, costed Databento download ticket (requests/*.yaml) for human sign-off. Drafts only: it cannot spend credit, cannot approve a request, and is not the authority on whether a request is legal - a deterministic validator asks the Databento API. Covers Databento historical US equities, futures and options datasets."
+# The wire the a2a-sdk JSON-RPC endpoint speaks. The SDK's native server is the
+# "1.0" wire (`SendMessage`), and the same value is registered with LiteLLM. The
+# endpoint also enables the SDK's v0.3 compatibility layer (see create_app), so
+# a legacy `message/send` caller still works - but the card advertises 1.0, which
+# is what the SDK server natively speaks.
 PROTOCOL_VERSION = "1.0"
 # The URL the card advertises — the address the LiteLLM proxy DIALS, from its
 # own vantage on `ai_proxy`. `0.0.0.0` is a *bind* address: the proxy reading it
@@ -87,14 +103,6 @@ agent = Agent(
 # ModelRetry with real error text, up to `retries["output"]` times.
 agent.output_validator(validate_agent_result)
 
-# The worker is built at import time so the lifespan can hand the SAME instance
-# to FastA2A and to worker_lifespan. HeaderForwardingWorker is the Pydantic AI
-# worker with the LiteLLM context headers put back in scope for the task (see
-# agent/headers.py) - the plain AgentWorker would lose them.
-storage = InMemoryStorage()
-broker = InMemoryBroker()
-worker = HeaderForwardingWorker(agent=agent, broker=broker, storage=storage)
-
 
 async def healthz(_: Request) -> JSONResponse:
     """Liveness for the container healthcheck and the Homepage widget."""
@@ -112,66 +120,131 @@ async def _register() -> None:
     )
 
 
-@asynccontextmanager
-async def _lifespan(app: FastA2A):
-    """Run the worker for the app's lifetime, and register once it is up."""
-    async with worker_lifespan(app, worker=worker, agent=agent):
-        await _register()
-        yield
+class TicketAgentExecutor(AgentExecutor):
+    """Runs the Pydantic AI agent for one A2A request and returns its ticket.
 
+    The SDK calls `execute` with the request's `RequestContext` (which carries
+    the user message and the `ServerCallContext`) and an `EventQueue` to publish
+    events on. We publish a working status, run the agent, publish the rendered
+    ticket as an artifact, and complete.
 
-# The A2A wire this server's JSON-RPC endpoint actually speaks. FastA2A 2.0.1
-# implements the 0.3 dialect (methods like `message/send`) but hard-codes its
-# served card's `supportedInterfaces[0].protocolVersion` to "1.0"
-# (fasta2a/applications.py). See _ProtocolHonestFastA2A.
-INTERFACE_PROTOCOL_VERSION = "0.3"
-
-
-class _ProtocolHonestFastA2A(FastA2A):
-    """FastA2A, with its served card declaring the wire it actually speaks.
-
-    FastA2A 2.0.1's card advertises `supportedInterfaces[0].protocolVersion =
-    "1.0"`, but its JSON-RPC endpoint only accepts the 0.3 dialect
-    (`message/send`, `message/stream`, `tasks/get`, ...). A client that trusts
-    the card therefore picks the A2A 1.0 transport and sends `SendMessage`,
-    which this server rejects: every call through the LiteLLM gateway fails
-    with a tagged-union `ValidationError` naming `SendMessage`.
-
-    That is the whole defect: the card lies about the interface version. The
-    LiteLLM gateway invokes us with an a2a-sdk client that reads this very
-    field to choose its transport, and no gateway-side setting can override it
-    (it fetches the card from this container directly). Serving the version the
-    server can honour makes the client select the compatible 0.3 transport.
-
-    Only the *interface* version is corrected. The client-facing version the
-    gateway advertises stays `PROTOCOL_VERSION` (from the registration card),
-    so nothing a caller sees today changes.
+    The request headers reach `current_litellm_headers()` here: the SDK's
+    default context builder records them in `call_context.state['headers']`, and
+    `capture_litellm_headers` puts them in the context variable that
+    `HeaderForwardingClient` injects on the agent's own model calls.
     """
 
-    interface_protocol_version = INTERFACE_PROTOCOL_VERSION
+    def __init__(self, agent: Agent):
+        self._agent = agent
 
-    async def _agent_card_endpoint(self, request: Request) -> Response:
-        response = await super()._agent_card_endpoint(request)
-        if response.status_code != 200:
-            return response
-        card = json.loads(response.body)
-        for interface in card.get("supportedInterfaces", []):
-            if interface.get("protocolBinding") == "JSONRPC":
-                interface["protocolVersion"] = self.interface_protocol_version
-        return Response(json.dumps(card).encode(), media_type="application/json")
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        # The a2a-sdk event pipeline requires the Task to be enqueued before any
+        # status/artifact update (otherwise the consumer raises
+        # InvalidAgentResponseError). On a fresh request we mint it from the user
+        # message; on a follow-up the framework hands us the stored task.
+        initial_task = context.current_task
+        if initial_task is None and context.message is not None:
+            initial_task = new_task_from_user_message(context.message)
+        if initial_task is not None:
+            await event_queue.enqueue_event(initial_task)
+
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        await updater.start_work()
+        capture_litellm_headers(context.call_context.state.get("headers"))
+        try:
+            result = await self._agent.run(context.get_user_input())
+            ticket = result.output
+            rendered = render_ticket_yaml(ticket)
+        except Exception as exc:  # a failed turn is a failed task, not a crash
+            await updater.failed(
+                updater.new_agent_message([new_text_part(f"The run failed: {exc}")])
+            )
+            return
+        await updater.add_artifact([new_text_part(rendered)], name="ticket")
+        await updater.complete()
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        await updater.cancel()
 
 
-def create_app() -> FastA2A:
-    return _ProtocolHonestFastA2A(
-        storage=storage,
-        broker=broker,
+class A2AVersionHeaderMiddleware:
+    """Supply the `A2A-Version` header the SDK dispatcher validates.
+
+    The SDK's dispatcher rejects a request whose `A2A-Version` header disagrees
+    with the dialect it routed to, and treats a *missing* header as "0.3". The
+    a2a-sdk client sets the header, but a client that omits it (or a raw probe)
+    would be rejected on the 1.0 path. So when the header is absent we supply
+    the version that matches the JSON-RPC method: the v0.3 methods are the ones
+    with a `/` in them (`message/send`), everything else is 1.0 (`SendMessage`).
+    An explicit header is never overridden.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        if any(key.lower() == b"a2a-version" for key, _ in scope.get("headers", [])):
+            await self.app(scope, receive, send)
+            return
+
+        body = b""
+        more = True
+        while more:
+            message = await receive()
+            body += message.get("body", b"")
+            more = message.get("more_body", False)
+        try:
+            method = json.loads(body or b"{}").get("method", "")
+        except (TypeError, ValueError):
+            method = ""
+        version = "0.3" if "/" in method else PROTOCOL_VERSION
+        scope = dict(scope)
+        scope["headers"] = [*scope.get("headers", []), (b"a2a-version", version.encode())]
+
+        async def replay():
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        await self.app(scope, replay, send)
+
+
+def create_app(*, agent_executor: AgentExecutor | None = None, agent_instance: Agent | None = None) -> Starlette:
+    """Build the ASGI app. `agent_instance`/`agent_executor` are injection points for tests."""
+    card = build_agent_card(
         name=AGENT_NAME,
-        url=CARD_URL,
         description=AGENT_DESCRIPTION,
+        url=CARD_URL,
+        protocol_version=PROTOCOL_VERSION,
         skills=AGENT_SKILLS,
-        routes=[Route("/healthz", healthz)],
-        middleware=[Middleware(LiteLLMHeaderMiddleware)],
-        lifespan=_lifespan,
+    )
+    executor = agent_executor or TicketAgentExecutor(agent)
+    request_handler = DefaultRequestHandler(
+        agent_executor=executor,
+        task_store=InMemoryTaskStore(),
+        agent_card=card,
+    )
+    inner_agent = agent_instance if agent_instance is not None else agent
+
+    @asynccontextmanager
+    async def lifespan(_app: Starlette):
+        async with inner_agent:
+            await _register()
+            yield
+
+    return Starlette(
+        routes=[
+            *create_agent_card_routes(card),
+            # v0.3 compatibility keeps the legacy `message/send` dialect working
+            # on the same endpoint, so a caller that reads the card as 0.3 is not
+            # locked out. The native 1.0 path is what the card advertises.
+            *create_jsonrpc_routes(request_handler, rpc_url="/", enable_v0_3_compat=True),
+            Route("/healthz", healthz),
+        ],
+        middleware=[Middleware(A2AVersionHeaderMiddleware)],
+        lifespan=lifespan,
     )
 
 
