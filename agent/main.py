@@ -14,6 +14,7 @@ container across the network, so a loopback bind is unreachable.
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,7 +27,7 @@ from pydantic_ai import Agent, ModelSettings, PromptedOutput
 from pydantic_ai.mcp import MCPToolset
 from starlette.middleware import Middleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from agent.card import AGENT_SKILLS
@@ -119,8 +120,49 @@ async def _lifespan(app: FastA2A):
         yield
 
 
+# The A2A wire this server's JSON-RPC endpoint actually speaks. FastA2A 2.0.1
+# implements the 0.3 dialect (methods like `message/send`) but hard-codes its
+# served card's `supportedInterfaces[0].protocolVersion` to "1.0"
+# (fasta2a/applications.py). See _ProtocolHonestFastA2A.
+INTERFACE_PROTOCOL_VERSION = "0.3"
+
+
+class _ProtocolHonestFastA2A(FastA2A):
+    """FastA2A, with its served card declaring the wire it actually speaks.
+
+    FastA2A 2.0.1's card advertises `supportedInterfaces[0].protocolVersion =
+    "1.0"`, but its JSON-RPC endpoint only accepts the 0.3 dialect
+    (`message/send`, `message/stream`, `tasks/get`, ...). A client that trusts
+    the card therefore picks the A2A 1.0 transport and sends `SendMessage`,
+    which this server rejects: every call through the LiteLLM gateway fails
+    with a tagged-union `ValidationError` naming `SendMessage`.
+
+    That is the whole defect: the card lies about the interface version. The
+    LiteLLM gateway invokes us with an a2a-sdk client that reads this very
+    field to choose its transport, and no gateway-side setting can override it
+    (it fetches the card from this container directly). Serving the version the
+    server can honour makes the client select the compatible 0.3 transport.
+
+    Only the *interface* version is corrected. The client-facing version the
+    gateway advertises stays `PROTOCOL_VERSION` (from the registration card),
+    so nothing a caller sees today changes.
+    """
+
+    interface_protocol_version = INTERFACE_PROTOCOL_VERSION
+
+    async def _agent_card_endpoint(self, request: Request) -> Response:
+        response = await super()._agent_card_endpoint(request)
+        if response.status_code != 200:
+            return response
+        card = json.loads(response.body)
+        for interface in card.get("supportedInterfaces", []):
+            if interface.get("protocolBinding") == "JSONRPC":
+                interface["protocolVersion"] = self.interface_protocol_version
+        return Response(json.dumps(card).encode(), media_type="application/json")
+
+
 def create_app() -> FastA2A:
-    return FastA2A(
+    return _ProtocolHonestFastA2A(
         storage=storage,
         broker=broker,
         name=AGENT_NAME,
