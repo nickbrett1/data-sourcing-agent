@@ -35,3 +35,7 @@ venv/
 
 
 
+
+# Python build artifacts
+# build/ is already ignored by "build"; dist/ was not.
+dist/

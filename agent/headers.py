@@ -27,8 +27,8 @@ import json
 import httpx
 from fasta2a.pydantic_ai import AgentWorker
 
-_headers: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar(
-    "litellm_headers", default={}
+_headers: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "litellm_headers", default=None
 )
 
 # The metadata key FastA2A carries from the HTTP request to the worker.
@@ -37,7 +37,7 @@ _METADATA_KEY = "litellmHeaders"
 
 def current_litellm_headers() -> dict[str, str]:
     """The LiteLLM context headers for the task being run, if any."""
-    return _headers.get()
+    return _headers.get() or {}
 
 
 def _with_metadata(body: bytes, forwarded: dict[str, str]) -> bytes:

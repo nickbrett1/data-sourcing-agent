@@ -140,3 +140,29 @@ generated Dockerfile, compose file and Homepage widget stay consistent:
 
 Regenerate with `overwrite: true` to apply these to an existing repo — existing
 app code is preserved; only generated infra files are updated.
+
+## 9. Deployment decisions (handover brief §5)
+
+Recorded here so they are not re-litigated in a chat.
+
+- **Compose location on the NAS:** beside pshelf/mcphub, under
+  `/volumeUSB1/usbshare/docker/data-sourcing-agent/` — **not** `/volume1/docker`.
+- **Secrets** come from Doppler and never enter the image. `LITELLM_API_KEY`
+  (invoke the agent / call models), `LITELLM_REGISTRATION_KEY`, and
+  `DATABENTO_API_KEY` (the Validator's oracle).
+  `LITELLM_REGISTRATION_KEY` **must be a key bound to a `proxy_admin` USER**: a
+  key minted with `user_role` on `/key/generate` is silently ignored and returns
+  HTTP 403 from `POST /v1/agents`. The working route is `POST /user/new` with
+  `user_role=proxy_admin`, then bind a key to that user.
+- **`A2A_CARD_URL`** is the container name on `ai_proxy`
+  (`http://data-sourcing-agent:8700`). `0.0.0.0` here registers green and fails
+  every invocation — it is a bind address and the proxy would dial itself. See
+  handover memo §4. **Verify through the gateway, not from the host:** a
+  host-side curl proves nothing about the proxy's vantage.
+- **`AGENT_STATE_DIR`** is `/state`, backed by a writable host mount
+  (`AGENT_STATE_HOST_DIR`). Without it, the remembered gateway agent id lives in
+  the image layer and a Watchtower recreate destroys it, re-triggering the
+  duplicate-name problem `agent/register.py` exists to avoid (§5.6).
+- **Homepage group:** `Services`. nas-reach-mcp overrode the same labels to sit
+  in `MCP Servers`, but this is an A2A agent, not an MCP server, so `Services` is
+  the honest group. Pick one; this is the pick (§5.7).

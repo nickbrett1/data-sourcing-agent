@@ -19,7 +19,7 @@ AGENT_SKILLS: list[Skill] = [
     Skill(
         id="answer",
         name="data-sourcing-agent",
-        description="Turns a fuzzy market-data need into a validated, costed Databento download ticket (requests/*.yaml) for human sign-off. Drafts only: it cannot spend credit, cannot approve a request, and is not the authority on whether a request is legal - the validator tool is. Covers Databento historical US equities, futures and options datasets.",
+        description="Turns a fuzzy market-data need into a validated, costed Databento download ticket (requests/*.yaml) for human sign-off. Drafts only: it cannot spend credit, cannot approve a request, and is not the authority on whether a request is legal - a deterministic validator asks the Databento API. Covers Databento historical US equities, futures and options datasets.",
         tags=["data-sourcing-agent", "a2a"],
         input_modes=["application/json"],
         output_modes=["application/json"],
