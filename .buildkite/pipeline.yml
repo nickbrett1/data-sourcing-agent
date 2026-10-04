@@ -30,8 +30,9 @@ steps:
       - ruff check agent src tests
       # Import the real ASGI entry point. This catches an import-time break in
       # agent/main.py (the thing uvicorn loads) that a pure lint/test pass can
-      # miss. It needs no secrets: the Validator is built lazily, on first use.
-      - python -c "import agent.main"
+      # miss. Building the model needs *an* api key but not a real one, so a
+      # placeholder is supplied; nothing here reaches the gateway or the network.
+      - LITELLM_API_KEY=ci-placeholder python -c "import agent.main"
       - pytest -q
 
   - label: ":docker: Build and publish image (GHCR)"
