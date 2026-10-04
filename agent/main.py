@@ -46,6 +46,7 @@ from agent.contract import validate_agent_result
 from agent.headers import capture_litellm_headers
 from agent.model import build_model
 from agent.register import register_with_litellm
+from agent.roost import RoostBridge
 from agent.ticket import TicketProposal, render_ticket_yaml
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -134,8 +135,11 @@ class TicketAgentExecutor(AgentExecutor):
     `HeaderForwardingClient` injects on the agent's own model calls.
     """
 
-    def __init__(self, agent: Agent):
+    def __init__(self, agent: Agent, roost_bridge: RoostBridge | None = None):
         self._agent = agent
+        # The fleet hub. A no-op bridge when roost is unconfigured, so this
+        # class never has to branch on whether roost is on (fail-open).
+        self._roost = roost_bridge or RoostBridge()
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         # The a2a-sdk event pipeline requires the Task to be enqueued before any
@@ -151,6 +155,11 @@ class TicketAgentExecutor(AgentExecutor):
         updater = TaskUpdater(event_queue, context.task_id, context.context_id)
         await updater.start_work()
         capture_litellm_headers(context.call_context.state.get("headers"))
+        # Reflect the turn in the roost fleet. The counters/emits are best-effort
+        # and never await the model, so a long turn cannot make the hub's
+        # `status.get` poll time out (which is what would drop the tunnel).
+        self._roost.turn_started()
+        await self._roost.emit("turn_started", taskId=context.task_id)
         try:
             result = await self._agent.run(context.get_user_input())
             ticket = result.output
@@ -160,6 +169,9 @@ class TicketAgentExecutor(AgentExecutor):
                 updater.new_agent_message([new_text_part(f"The run failed: {exc}")])
             )
             return
+        finally:
+            self._roost.turn_finished()
+            await self._roost.emit("finished", taskId=context.task_id)
         await updater.add_artifact([new_text_part(rendered)], name="ticket")
         await updater.complete()
 
@@ -211,8 +223,20 @@ class A2AVersionHeaderMiddleware:
         await self.app(scope, replay, send)
 
 
-def create_app(*, agent_executor: AgentExecutor | None = None, agent_instance: Agent | None = None) -> Starlette:
-    """Build the ASGI app. `agent_instance`/`agent_executor` are injection points for tests."""
+def create_app(
+    *,
+    agent_executor: AgentExecutor | None = None,
+    agent_instance: Agent | None = None,
+    roost_bridge: RoostBridge | None = None,
+) -> Starlette:
+    """Build the ASGI app.
+
+    `agent_instance`/`agent_executor`/`roost_bridge` are injection points for
+    tests. The roost bridge is built from the environment here (so the served app
+    and the client are configured by one place); with no `ROOST_HUB_URL` it is a
+    no-op, and the agent serves exactly as before.
+    """
+    bridge = roost_bridge if roost_bridge is not None else RoostBridge.from_env(agent_name=AGENT_NAME)
     card = build_agent_card(
         name=AGENT_NAME,
         description=AGENT_DESCRIPTION,
@@ -220,7 +244,7 @@ def create_app(*, agent_executor: AgentExecutor | None = None, agent_instance: A
         protocol_version=PROTOCOL_VERSION,
         skills=AGENT_SKILLS,
     )
-    executor = agent_executor or TicketAgentExecutor(agent)
+    executor = agent_executor or TicketAgentExecutor(agent, bridge)
     request_handler = DefaultRequestHandler(
         agent_executor=executor,
         task_store=InMemoryTaskStore(),
@@ -232,7 +256,14 @@ def create_app(*, agent_executor: AgentExecutor | None = None, agent_instance: A
     async def lifespan(_app: Starlette):
         async with inner_agent:
             await _register()
-            yield
+            # Dial the roost hub alongside the A2A server. `start` returns
+            # immediately and connection failures are retried in the background,
+            # so a hub outage never delays or breaks startup (fail-open).
+            await bridge.start()
+            try:
+                yield
+            finally:
+                await bridge.stop()
 
     return Starlette(
         routes=[

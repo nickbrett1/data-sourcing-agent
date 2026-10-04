@@ -36,6 +36,16 @@ services:
       # at the mount below so it survives a Watchtower recreate; the image-layer
       # default would not (agent/register.py).
       AGENT_STATE_DIR: ${AGENT_STATE_DIR:-/state}
+      # roost fleet visibility (optional). Blank = not in the fleet, and the
+      # client is not built at all (fail-open). There is no derivable default:
+      # roost is on a different Docker network (`roost_default`) from this
+      # container (`ai_proxy`), so `nas` and `roost` do not resolve from here.
+      # Set it to an address that does - see agent/README.md §roost.
+      ROOST_HUB_URL: ${ROOST_HUB_URL:-}
+      ROOST_AGENT_ID: ${ROOST_AGENT_ID:-}
+      ROOST_ENABLED: ${ROOST_ENABLED:-true}
+      ROOST_TOKEN_ENV: ${ROOST_TOKEN_ENV:-ROOST_AGENT_TOKEN}
+      ROOST_AGENT_TOKEN: ${ROOST_AGENT_TOKEN:-}
     volumes:
       # Writable, so the remembered agent id survives a redeploy (§5.6). A
       # NAS-side .env sets AGENT_STATE_HOST_DIR to the deployed directory.
