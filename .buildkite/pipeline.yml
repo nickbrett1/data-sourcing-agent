@@ -24,7 +24,14 @@ steps:
       - python -m pip install --no-cache-dir -e ".[dev]"
       - python -m pip install --no-cache-dir build
       - python -m build
-      - ruff check src tests
+      # Lint and test the agent package TOO: it is the code the image runs, and
+      # it was previously neither linted nor tested (the generated pipeline only
+      # covered `src` and `tests`). See the handover memo §5.3.
+      - ruff check agent src tests
+      # Import the real ASGI entry point. This catches an import-time break in
+      # agent/main.py (the thing uvicorn loads) that a pure lint/test pass can
+      # miss. It needs no secrets: the Validator is built lazily, on first use.
+      - python -c "import agent.main"
       - pytest -q
 
   - label: ":docker: Build and publish image (GHCR)"
