@@ -32,6 +32,7 @@ from a2a.server.events.event_queue import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore
+from a2a.server.tasks.task_store import TaskStore
 from a2a.server.tasks.task_updater import TaskUpdater
 from pydantic_ai import Agent, ModelSettings, PromptedOutput
 from pydantic_ai.mcp import MCPToolset
@@ -44,6 +45,7 @@ from starlette.routing import Route
 from agent.card import AGENT_SKILLS, build_agent_card
 from agent.contract import validate_agent_result
 from agent.headers import capture_litellm_headers
+from agent.history import TaskHistory, build_task_store
 from agent.model import build_model
 from agent.register import register_with_litellm
 from agent.roost import RoostBridge
@@ -228,15 +230,32 @@ def create_app(
     agent_executor: AgentExecutor | None = None,
     agent_instance: Agent | None = None,
     roost_bridge: RoostBridge | None = None,
+    task_store: TaskStore | None = None,
 ) -> Starlette:
     """Build the ASGI app.
 
-    `agent_instance`/`agent_executor`/`roost_bridge` are injection points for
-    tests. The roost bridge is built from the environment here (so the served app
-    and the client are configured by one place); with no `ROOST_HUB_URL` it is a
-    no-op, and the agent serves exactly as before.
+    `agent_instance`/`agent_executor`/`roost_bridge`/`task_store` are injection
+    points for tests. The task store is built here from the environment: a
+    durable SQLite database under `AGENT_STATE_DIR`, so a session's history
+    survives a Watchtower recreate. If it cannot be built the agent falls back to
+    the in-memory store and still serves (fail-open). The roost bridge is built
+    from the environment here too; with no `ROOST_HUB_URL` it is a no-op, and the
+    agent serves exactly as before.
     """
-    bridge = roost_bridge if roost_bridge is not None else RoostBridge.from_env(agent_name=AGENT_NAME)
+    # Persist task/session state. `build_task_store` returns None (rather than
+    # raising) when SQLAlchemy is unavailable, so the fallback keeps the agent up.
+    store = task_store if task_store is not None else build_task_store(AGENT_NAME)
+    if store is None:
+        store = InMemoryTaskStore()
+    # One reader over the same store the A2A handler writes, so roost answers
+    # from the server's own session state rather than a second transcript store.
+    history = TaskHistory(store)
+
+    bridge = (
+        roost_bridge
+        if roost_bridge is not None
+        else RoostBridge.from_env(agent_name=AGENT_NAME, history=history)
+    )
     card = build_agent_card(
         name=AGENT_NAME,
         description=AGENT_DESCRIPTION,
@@ -247,7 +266,7 @@ def create_app(
     executor = agent_executor or TicketAgentExecutor(agent, bridge)
     request_handler = DefaultRequestHandler(
         agent_executor=executor,
-        task_store=InMemoryTaskStore(),
+        task_store=store,
         agent_card=card,
     )
     inner_agent = agent_instance if agent_instance is not None else agent
@@ -256,6 +275,12 @@ def create_app(
     async def lifespan(_app: Starlette):
         async with inner_agent:
             await _register()
+            # Bound the store's growth once, at startup. Fail-open: a sweep
+            # problem must not stop the agent serving.
+            try:
+                await history.retention_sweep()
+            except Exception as exc:
+                print(f"[history] retention sweep skipped: {exc!r}", flush=True)
             # Dial the roost hub alongside the A2A server. `start` returns
             # immediately and connection failures are retried in the background,
             # so a hub outage never delays or breaks startup (fail-open).

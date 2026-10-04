@@ -110,17 +110,39 @@ cannot reuse the dev agent's `hub:` config block - it needs this client. It is
 the first Python implementation of roost protocol v1 (the other is Rust, inside
 `a2a-goose`), so `tests/test_roost.py` pins every frame shape the client emits.
 
-### What it claims, and what it does not
+### What it claims, and what it answers
 
-`hello` advertises `capabilities: ["activity", "status"]` and `kind:
-"pydantic-agent"`. It deliberately does **not** claim `sessions` / `history`:
-this agent has no goose `sessions.db`, so answering `history.*` would mean
-inventing a second transcript store and a second schema. Claim only what you can
-serve. `status.get` is answered by a read loop that never awaits a model call, so
-a long turn cannot make the hub's ~15 s poll time out (three missed polls and the
+`hello` advertises `capabilities: ["activity", "status", "sessions"]` and `kind:
+"pydantic-agent"`. It answers the `history.*` family (`history.sessions`,
+`history.session`, `history.messages`, `history.search`), `sessions.list`, and
+`status.get` from the **A2A server's own task store** - not from a second
+transcript store. `contextId` groups tasks into a session, each `Task` is a
+turn, and `task.history` (plus the turn's rendered artifact) is the transcript,
+so the history is the server's real conversation state rather than something
+invented for the UI. The `sessions` token is deliberately the same one the
+`a2a-goose` agents advertise, so roost's existing History UI logic covers this
+agent with no new vocabulary.
+
+An unclaimed method (`logs.tail`, `reboot`, ...) is answered `ok: false` with an
+explicit error, never with an invented body. A problem in the history store is
+fail-open the same way: the method answers `ok: false`, it never stops the agent
+serving.
+
+`status.get` is answered by a read loop that never awaits a model call, so a
+long turn cannot make the hub's ~15 s poll time out (three missed polls and the
 hub drops the tunnel). The client reconnects with backoff **forever** and is
 **fail-open**: a roost outage is logged and retried in the background and never
 stops the agent serving.
+
+### Durable task store
+
+History is only honest if it survives a redeploy, so the A2A server's task store
+is SQLite at `$AGENT_STATE_DIR/a2a_tasks.db` (the same writable mount the
+remembered gateway id already uses - no new variable, no new mount). A startup
+retention sweep keeps the newest ~200 sessions and nothing older than 30 days,
+so the file cannot grow without bound; `status.get.sessions.retained` reports
+what is actually still present. If SQLAlchemy/the store cannot be built, the
+agent falls back to the in-memory store and keeps serving (fail-open).
 
 ### What has to be set at deploy time
 

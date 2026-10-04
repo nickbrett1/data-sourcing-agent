@@ -149,10 +149,11 @@ def test_hello_frame_has_the_protocol_shape():
     assert hello["bootId"]  # required; freshness is pinned by the next test
     assert "startedAt" in hello
     assert hello["skills"] == ["ask"]
-    # The deliberate refusal: presence + status + a coarse feed, NOT sessions.
-    assert hello["capabilities"] == CAPABILITIES == ["activity", "status"]
-    assert "sessions" not in hello["capabilities"]
-    assert "history" not in hello["capabilities"]
+    # Presence, status, AND session history: this agent now answers `history.*`
+    # from the A2A server's own task store, so it claims `sessions` - the same
+    # token the `a2a-goose` agents advertise, so roost's UI history logic applies.
+    assert hello["capabilities"] == CAPABILITIES == ["activity", "status", "sessions"]
+    assert "sessions" in hello["capabilities"]
     # `seq` belongs to activity frames, not hello.
     assert "seq" not in hello
 
@@ -244,7 +245,35 @@ def test_an_unclaimed_method_is_refused_honestly():
 
     async def handler(ws):
         frames.append(json.loads(await ws.recv()))
-        await ws.send(json.dumps({"type": "request", "id": "r2", "method": "history.sessions"}))
+        await ws.send(json.dumps({"type": "request", "id": "r2", "method": "logs.tail"}))
+        frames.append(json.loads(await ws.recv()))
+        await ws.close()
+
+    async def run() -> None:
+        async with _roost_server(handler) as url:
+            client = _client(url, backoff_initial=0.05, backoff_max=0.05)
+            client.start()
+            await _wait_until(lambda: len(frames) >= 2)
+            await client.stop()
+
+    asyncio.run(run())
+    response = frames[1]
+    assert response["ok"] is False
+    assert "logs.tail" in response["error"]
+
+
+def test_a_claimed_history_method_refuses_when_no_store_is_configured():
+    """Fail-open, and honest: no store means an explicit refusal, not a lie.
+
+    A client with no history provider still *advertises* `sessions` (the store is
+    built at app startup), but before/without one a claimed method must answer
+    `ok:false` rather than an empty transcript.
+    """
+    frames: list[dict] = []
+
+    async def handler(ws):
+        frames.append(json.loads(await ws.recv()))
+        await ws.send(json.dumps({"type": "request", "id": "r9", "method": "history.sessions"}))
         frames.append(json.loads(await ws.recv()))
         await ws.close()
 
