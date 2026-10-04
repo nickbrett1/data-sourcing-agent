@@ -22,6 +22,24 @@ services:
       LITELLM_BASE_URL: ${LITELLM_BASE_URL:-http://litellm:4000}
       LITELLM_API_KEY: ${LITELLM_API_KEY}
       LITELLM_REGISTRATION_KEY: ${LITELLM_REGISTRATION_KEY}
+      LITELLM_MODEL: ${LITELLM_MODEL:-deepseek-v4-flash}
+      # The Validator's oracle. Without it the agent cannot call a request valid
+      # or a cost known, so the container refuses to price anything (see
+      # agent/validator.py). It is a secret: from a NAS-side .env, never the image.
+      DATABENTO_API_KEY: ${DATABENTO_API_KEY}
+      # The address the card advertises — the address LiteLLM DIALS from its own
+      # vantage on `ai_proxy`, where this container's name resolves. Setting
+      # `0.0.0.0` here would register green and fail every invocation (handover
+      # memo §4). Override only with an address reachable FROM the proxy.
+      A2A_CARD_URL: ${A2A_CARD_URL:-http://data-sourcing-agent:8700}
+      # Where the gateway-assigned agent id is remembered between runs. Pointed
+      # at the mount below so it survives a Watchtower recreate; the image-layer
+      # default would not (agent/register.py).
+      AGENT_STATE_DIR: ${AGENT_STATE_DIR:-/state}
+    volumes:
+      # Writable, so the remembered agent id survives a redeploy (§5.6). A
+      # NAS-side .env sets AGENT_STATE_HOST_DIR to the deployed directory.
+      - ${AGENT_STATE_HOST_DIR:-./state}:/state
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       - "homepage.group=Services"
