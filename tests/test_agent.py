@@ -226,36 +226,185 @@ def test_card_url_is_a_dial_address_not_a_bind_address():
     assert "0.0.0.0" not in main.CARD_URL
 
 
+def _stub_agent():
+    """A stand-in for the Pydantic AI agent: runs offline, returns a Ticket."""
+    from types import SimpleNamespace
+
+    class _Stub:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def run(self, prompt):  # noqa: ARG002
+            return SimpleNamespace(
+                output=Ticket(
+                    request=_request(),
+                    cost=TicketCost(estimate_usd=1.2197, max_usd=2.0),
+                    why="probe the table shape",
+                )
+            )
+
+    return _Stub()
+
+
+def _app_with_stub():
+    from agent import main
+
+    stub = _stub_agent()
+    return main.create_app(
+        agent_executor=main.TicketAgentExecutor(stub), agent_instance=stub
+    )
+
+
 def test_served_card_declares_the_wire_the_server_speaks():
-    """The card's interface version must match the JSON-RPC dialect FastA2A speaks.
+    """The card's interface version must match the SDK server's wire.
 
-    FastA2A 2.0.1 accepts the 0.3 dialect (`message/send`, `tasks/get`, ...) but
-    hard-codes its interface's `protocolVersion` to "1.0". An a2a-sdk client —
-    which is what the LiteLLM gateway uses to invoke us — reads that field to
-    choose its transport, picks the 1.0 one, sends `SendMessage`, and is
-    rejected by this server. The served card must therefore say "0.3", so the
-    gateway selects the compatible transport.
+    The server is the official a2a-sdk, whose native JSON-RPC dialect is 1.0
+    (`SendMessage`). An a2a-sdk client — which is what the LiteLLM gateway uses
+    to invoke us — reads this field to choose its transport. The card must
+    advertise the version the server actually speaks, and it must be the same
+    version the container registers with LiteLLM.
     """
-    import json
-
-    from starlette.requests import Request
+    from starlette.testclient import TestClient
 
     from agent import main
 
-    app = main.create_app()
-    request = Request(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": "/.well-known/agent-card.json",
-            "headers": [],
-        }
-    )
-    response = asyncio.run(app._agent_card_endpoint(request))
-    card = json.loads(response.body)
+    with TestClient(_app_with_stub()) as client:
+        card = client.get("/.well-known/agent-card.json").json()
+
     jsonrpc = [i for i in card["supportedInterfaces"] if i["protocolBinding"] == "JSONRPC"]
     assert jsonrpc, "the card must advertise a JSONRPC interface"
-    assert all(i["protocolVersion"] == "0.3" for i in jsonrpc)
-    # The client-facing version is pinned separately and is deliberately not
-    # changed by this fix.
+    assert all(i["protocolVersion"] == "1.0" for i in jsonrpc)
     assert main.PROTOCOL_VERSION == "1.0"
+
+
+def test_native_send_message_returns_a_completed_task():
+    """The a2a-sdk 1.0 request the gateway sends must return a task, not an error.
+
+    This is the transport the gateway selects once the card advertises 1.0: a
+    `SendMessage` with the `A2A-Version: 1.0` header. Success is a JSON-RPC
+    `result` carrying a completed task whose artifact holds the rendered ticket.
+    """
+    from a2a.helpers.proto_helpers import new_text_part
+    from a2a.types.a2a_pb2 import Message, Role, SendMessageRequest
+    from google.protobuf.json_format import MessageToDict
+    from starlette.testclient import TestClient
+
+    params = MessageToDict(
+        SendMessageRequest(
+            message=Message(
+                message_id="m1",
+                role=Role.ROLE_USER,
+                parts=[new_text_part("One day of the SPY options chain.")],
+            )
+        )
+    )
+    body = {"jsonrpc": "2.0", "id": "1", "method": "SendMessage", "params": params}
+
+    with TestClient(_app_with_stub()) as client:
+        response = client.post("/", json=body, headers={"A2A-Version": "1.0"})
+
+    assert response.status_code == 200
+    task = response.json()["result"]["task"]
+    assert task["status"]["state"] == "TASK_STATE_COMPLETED"
+    texts = [p["text"] for a in task["artifacts"] for p in a["parts"] if "text" in p]
+    assert any("state: draft" in t for t in texts)
+
+
+def test_v03_message_send_gateway_shape_is_accepted():
+    """The legacy `message/send` payload the gateway currently sends must work.
+
+    The v0.3 adapter is enabled on the same endpoint, so a caller that reads the
+    card as 0.3 — including the partial `configuration` (`{blocking: true}`
+    without `acceptedOutputModes`) that broke FastA2A — is still served.
+    """
+    from a2a.compat.v0_3 import types as v03
+    from starlette.testclient import TestClient
+
+    params = v03.MessageSendParams(
+        message=v03.Message(
+            message_id="m1",
+            role=v03.Role.user,
+            parts=[v03.Part(root=v03.TextPart(text="One day of the SPY chain."))],
+        ),
+        configuration=v03.MessageSendConfiguration(blocking=True),
+    )
+    body = {
+        "jsonrpc": "2.0",
+        "id": "2",
+        "method": "message/send",
+        "params": params.model_dump(by_alias=True, exclude_none=True),
+    }
+
+    with TestClient(_app_with_stub()) as client:
+        response = client.post("/", json=body)
+
+    assert response.status_code == 200
+    # A result, not an error: the gateway's failure mode was HTTP 500 / error.
+    assert "result" in response.json()
+
+
+def test_request_headers_reach_the_litellm_forwarder():
+    """Inbound `x-litellm-*` headers must reach `current_litellm_headers()`.
+
+    The gateway stamps its calls with trace/agent headers, and the agent's own
+    model calls must carry them (see agent/headers.py). The a2a-sdk executor no
+    longer receives them through FastA2A's JSON-RPC metadata round-trip, so this
+    pins that the SDK's `call_context.state['headers']` path still feeds the
+    forwarder.
+    """
+    from types import SimpleNamespace
+
+    from a2a.helpers.proto_helpers import new_text_part
+    from a2a.types.a2a_pb2 import Message, Role, SendMessageRequest
+    from google.protobuf.json_format import MessageToDict
+    from starlette.testclient import TestClient
+
+    from agent import main
+    from agent.headers import current_litellm_headers
+
+    seen: dict[str, str] = {}
+
+    class _RecordingAgent:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):  # noqa: ANN002
+            return False
+
+        async def run(self, prompt):  # noqa: ARG002
+            seen.update(current_litellm_headers())
+            return SimpleNamespace(
+                output=Ticket(
+                    request=_request(),
+                    cost=TicketCost(estimate_usd=1.2197, max_usd=2.0),
+                    why="probe the table shape",
+                )
+            )
+
+    stub = _RecordingAgent()
+    app = main.create_app(
+        agent_executor=main.TicketAgentExecutor(stub), agent_instance=stub
+    )
+    params = MessageToDict(
+        SendMessageRequest(
+            message=Message(
+                message_id="m1",
+                role=Role.ROLE_USER,
+                parts=[new_text_part("One day of the SPY chain.")],
+            )
+        )
+    )
+    body = {"jsonrpc": "2.0", "id": "1", "method": "SendMessage", "params": params}
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/",
+            json=body,
+            headers={"A2A-Version": "1.0", "X-LiteLLM-Trace-Id": "trace-abc"},
+        )
+
+    assert response.status_code == 200
+    assert seen.get("x-litellm-trace-id") == "trace-abc"

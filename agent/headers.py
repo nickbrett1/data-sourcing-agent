@@ -10,29 +10,29 @@ makes trace grouping and cost attribution work. Without it both features
 silently do nothing - the calls look wired up and produce ungrouped,
 unattributed traces.
 
-FastA2A runs each task on a background worker, so the request's HTTP headers are
-not in scope by the time the model is called. So:
+Under FastA2A the task ran on a background broker with no access to the HTTP
+request, so the headers had to be copied into the JSON-RPC `metadata` and read
+back out by a custom worker. The a2a-sdk `AgentExecutor` runs with the request's
+`ServerCallContext` in hand, and the SDK's default context builder records the
+request headers in `call_context.state['headers']` - so the executor reads them
+directly (`capture_litellm_headers`) and puts them in a context variable that
+`HeaderForwardingClient` injects on every outbound model request:
 
-  1. `LiteLLMHeaderMiddleware` copies the incoming `X-LiteLLM-*` headers into
-     the JSON-RPC request `metadata` (which FastA2A carries to the worker);
-  2. `HeaderForwardingWorker` reads them back out into a context variable;
-  3. `HeaderForwardingClient` injects them on every outbound model request.
+  1. `TicketAgentExecutor.execute` calls `capture_litellm_headers` with the
+     request headers from the call context;
+  2. `HeaderForwardingClient` injects them on every outbound model request.
 """
 
 from __future__ import annotations
 
 import contextvars
-import json
+from collections.abc import Mapping
 
 import httpx
-from fasta2a.pydantic_ai import AgentWorker
 
 _headers: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "litellm_headers", default=None
 )
-
-# The metadata key FastA2A carries from the HTTP request to the worker.
-_METADATA_KEY = "litellmHeaders"
 
 
 def current_litellm_headers() -> dict[str, str]:
@@ -40,66 +40,19 @@ def current_litellm_headers() -> dict[str, str]:
     return _headers.get() or {}
 
 
-def _with_metadata(body: bytes, forwarded: dict[str, str]) -> bytes:
-    """Put `forwarded` under `params.metadata` in a JSON-RPC request body."""
-    try:
-        payload = json.loads(body or b"{}")
-    except (TypeError, ValueError):
-        return body
-    params = payload.get("params")
-    if not isinstance(params, dict):
-        return body
-    metadata = params.get("metadata")
-    if not isinstance(metadata, dict):
-        metadata = {}
-    metadata[_METADATA_KEY] = forwarded
-    params["metadata"] = metadata
-    return json.dumps(payload).encode("utf-8")
+def capture_litellm_headers(headers: Mapping[str, str] | None) -> dict[str, str]:
+    """Record the request's `X-LiteLLM-*` headers for the current task.
 
-
-class LiteLLMHeaderMiddleware:
-    """ASGI middleware: carry `X-LiteLLM-*` headers into the request metadata."""
-
-    def __init__(self, app):
-        self.app = app
-
-    async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http":
-            await self.app(scope, receive, send)
-            return
-        headers = {
-            key.decode("latin-1").lower(): value.decode("latin-1")
-            for key, value in scope.get("headers", [])
-        }
-        forwarded = {
-            key: value for key, value in headers.items() if key.startswith("x-litellm-")
-        }
-        if not forwarded:
-            await self.app(scope, receive, send)
-            return
-
-        body = b""
-        more = True
-        while more:
-            message = await receive()
-            body += message.get("body", b"")
-            more = message.get("more_body", False)
-        body = _with_metadata(body, forwarded)
-
-        async def replay():
-            return {"type": "http.request", "body": body, "more_body": False}
-
-        await self.app(scope, replay, send)
-
-
-class HeaderForwardingWorker(AgentWorker):
-    """The FastA2A Pydantic AI worker, with the request's headers in scope."""
-
-    async def run_task(self, params):
-        metadata = params.get("metadata") or {}
-        forwarded = metadata.get(_METADATA_KEY) or {}
-        _headers.set(dict(forwarded))
-        await super().run_task(params)
+    Header names are lower-cased before matching: Starlette hands the SDK a
+    lower-cased header mapping, but a caller (or a test) may not.
+    """
+    forwarded = {
+        str(key).lower(): value
+        for key, value in (headers or {}).items()
+        if str(key).lower().startswith("x-litellm-")
+    }
+    _headers.set(forwarded)
+    return forwarded
 
 
 class HeaderForwardingClient(httpx.AsyncClient):
