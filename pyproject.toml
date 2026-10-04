@@ -17,7 +17,7 @@ dependencies = [
     # `$AGENT_STATE_DIR` is what makes roost's `history.*` survive a Watchtower
     # recreate - the whole point of answering sessions at all. Same pinned SDK
     # version, just with the extra.
-    "a2a-sdk[sqlite]==1.1.0",
+    "a2a-sdk[sqlite]==1.2.1",
     # The HTTP surface for the SDK server (`create_jsonrpc_routes` /
     # `create_agent_card_routes` are Starlette routes; the dispatcher streams
     # via sse-starlette). Declared explicitly because `fasta2a`, which used to
