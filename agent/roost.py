@@ -28,13 +28,22 @@ bug, not a detail. The hub polls `status.get` about every 15 s and drops the
 socket after three missed intervals, so a long model call must never block the
 reply: the read loop here is its own task and never awaits the model.
 
-What this agent claims, and what it refuses to
-----------------------------------------------
-It advertises `capabilities: ["activity", "status"]` and deliberately **not**
-`sessions` / `history`. A Pydantic AI agent has no goose `sessions.db`, so
-answering `history.*` would mean inventing a second transcript store and a second
-schema - exactly what roost's "router, not a store" principle exists to avoid.
-Claim only what you can serve.
+What this agent claims
+----------------------
+It advertises `capabilities: ["activity", "status", "sessions"]` and answers the
+`history.*` family honestly. The old position - refuse `sessions` because a
+Pydantic AI agent has no goose `sessions.db` - was correct only while there was
+no store to answer from. There is one: the A2A server's own `TaskStore` already
+groups turns by `contextId` and keeps each turn's messages. `agent/history.py`
+reads that state (see its docstring); persisting the store is what makes the
+answer survive a restart. The `sessions` token is deliberately the same one the
+`a2a-goose` agents advertise, so roost's existing UI history logic covers this
+agent with no new vocabulary.
+
+Anything still unclaimed (`logs.tail`, `reboot`, ...) is answered `ok: false`
+with an explicit error rather than an invented body. A problem in the history
+store is fail-open too: the method returns `ok: false`, it never stops the agent
+serving.
 
 Fail-open by construction
 -------------------------
@@ -61,7 +70,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 import websockets
 
@@ -75,9 +84,10 @@ DEFAULT_KIND = "pydantic-agent"
 AGENT_VERSION = "0.1.0"
 
 # Capabilities are agent-declared and vary across the fleet. This agent can
-# serve presence, a real (if coarse) activity feed, and liveness status - and
-# nothing else. It does NOT claim sessions/history: it has no transcript store.
-CAPABILITIES = ["activity", "status"]
+# serve presence, a real (if coarse) activity feed, liveness status, and session
+# history. `sessions` is deliberately the same token the `a2a-goose` agents
+# advertise, so roost's existing history UI logic covers this agent too.
+CAPABILITIES = ["activity", "status", "sessions"]
 SKILLS = ["ask"]
 
 # Environment variables. The hub address has NO default (see the module
@@ -93,6 +103,35 @@ DEFAULT_TOKEN_ENV = "ROOST_AGENT_TOKEN"
 # after a drop is right; a genuinely unreachable hub backs off to the cap.
 BACKOFF_INITIAL_SECONDS = 1.0
 BACKOFF_MAX_SECONDS = 60.0
+
+# The history methods this agent answers, and the capability token that
+# advertises them. roost's History panel calls exactly these.
+HISTORY_CAPABILITY = "sessions"
+
+
+class HistoryProvider(Protocol):
+    """The subset of `agent.history.TaskHistory` the roost client needs.
+
+    Declared as a protocol so the client depends on the shape, not the concrete
+    store (and so a test can hand it a real `TaskHistory` over any `TaskStore`).
+    """
+
+    async def sessions(self) -> list[dict]:
+        """Every session's metadata, newest first."""
+
+    async def session(self, session_id: str) -> dict | None:
+        """One session's metadata, or None."""
+
+    async def messages(
+        self, session_id: str, *, cursor: Any = None, limit: Any = None
+    ) -> dict:
+        """A page of a session's transcript."""
+
+    async def search(self, query: str, *, limit: int = ...) -> dict:
+        """Substring matches over stored message text."""
+
+    async def status(self) -> dict:
+        """The `status.get.sessions` block."""
 
 
 @dataclass(frozen=True)
@@ -148,6 +187,105 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _session_id(params: dict) -> str:
+    """A session id from a request's params, under any of the names in use."""
+    for key in ("id", "sessionId", "contextId"):
+        value = params.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+async def _answer_status(client: RoostClient, params: dict) -> dict:
+    """`status.get` - the liveness body, with the real session counts when known.
+
+    Nothing here awaits a model call; the session count is a local store read, so
+    the hub's ~15 s poll is still answered inside one interval.
+    """
+    body = client._status_body()
+    if client._history is not None:
+        try:
+            body["sessions"] = await client._history.status()
+        except Exception as exc:
+            print(f"[roost] session counts unavailable: {exc!r}", flush=True)
+    return body
+
+
+async def _answer_sessions_list(client: RoostClient, params: dict) -> dict:
+    """`sessions.list` - distinct contexts, lightly, plus their count."""
+    sessions = await client._require_history().sessions()
+    entries = [
+        {
+            "contextId": session["sessionId"],
+            "sessionId": session["sessionId"],
+            "skillId": SKILLS[0],
+            "turnCount": session.get("turnCount", 0),
+            "messageCount": session.get("messageCount", 0),
+            "retained": bool(session.get("retained", True)),
+        }
+        for session in sessions
+    ]
+    return {"sessions": entries, "count": len(entries)}
+
+
+async def _answer_history_sessions(client: RoostClient, params: dict) -> dict:
+    """`history.sessions` - session summaries, newest first."""
+    limit = _coerce_int(params.get("limit"), 50)
+    sessions = await client._require_history().sessions()
+    query = str(params.get("q") or "").strip().lower()
+    if query:
+        sessions = [s for s in sessions if query in (s.get("name") or "").lower()]
+    return {"sessions": sessions[:limit], "nextCursor": None}
+
+
+async def _answer_history_session(client: RoostClient, params: dict) -> dict:
+    """`history.session` - one session's metadata plus its transcript."""
+    history = client._require_history()
+    session_id = _session_id(params)
+    session = await history.session(session_id) if session_id else None
+    if session is None:
+        return {"session": None}
+    messages = (await history.messages(session_id))["messages"]
+    return {"session": session, "messages": messages}
+
+
+async def _answer_history_messages(client: RoostClient, params: dict) -> dict:
+    """`history.messages` - a page of a session's transcript."""
+    return await client._require_history().messages(
+        _session_id(params),
+        cursor=params.get("cursor"),
+        limit=params.get("limit"),
+    )
+
+
+async def _answer_history_search(client: RoostClient, params: dict) -> dict:
+    """`history.search` - substring matches over stored message text."""
+    limit = _coerce_int(params.get("limit"), 50)
+    return await client._require_history().search(
+        str(params.get("q") or ""), limit=limit
+    )
+
+
+# The claimed methods, and what answers each. `status.get` is included here so
+# one table is the whole wire surface this client serves.
+_REQUEST_HANDLERS: dict[str, Any] = {
+    "status.get": _answer_status,
+    "sessions.list": _answer_sessions_list,
+    "history.sessions": _answer_history_sessions,
+    "history.session": _answer_history_session,
+    "history.messages": _answer_history_messages,
+    "history.search": _answer_history_search,
+}
+
+
 class RoostClient:
     """One long-lived, reconnecting WebSocket to a roost hub.
 
@@ -162,6 +300,7 @@ class RoostClient:
         config: RoostConfig,
         *,
         state: RoostState | None = None,
+        history: HistoryProvider | None = None,
         connect: Callable[..., Any] | None = None,
         boot_id: str | None = None,
         started_at: str | None = None,
@@ -171,6 +310,10 @@ class RoostClient:
     ) -> None:
         self._config = config
         self._state = state or RoostState()
+        # The task store, in the shapes roost's History panel reads. None when no
+        # store could be built; the history methods then refuse explicitly rather
+        # than inventing an empty transcript.
+        self._history = history
         self._connect = connect or websockets.connect
         self._clock = clock or _utc_now_iso
         # Fresh per process: a bootId that survives a restart corrupts the hub's
@@ -195,6 +338,15 @@ class RoostClient:
     @property
     def connected(self) -> bool:
         return self._connected
+
+    def set_history(self, history: HistoryProvider | None) -> None:
+        """Attach (or replace) the task store the history methods read."""
+        self._history = history
+
+    def _require_history(self) -> HistoryProvider:
+        if self._history is None:
+            raise RuntimeError("no session history store is available")
+        return self._history
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -317,18 +469,32 @@ class RoostClient:
         # Anything else (a future frame type) is deliberately ignored.
 
     async def _handle_request(self, frame: dict) -> None:
+        """Dispatch one hub `request`, through the method table below.
+
+        A known method is answered with a body; an unknown one with `ok: false`
+        and an explicit error (never an invented body). A method whose backing
+        store is missing or fails also answers `ok: false` - fail-open, so a
+        history problem can never stop the agent serving.
+        """
         request_id = frame.get("id")
         method = frame.get("method")
-        if method == "status.get":
-            await self._respond(request_id, ok=True, body=self._status_body())
-        else:
-            # We advertised only activity/status, so history.* and sessions.* are
-            # answered honestly as unsupported rather than with an invented body.
+        params = frame.get("params")
+        if not isinstance(params, dict):
+            params = {}
+        handler = _REQUEST_HANDLERS.get(method)
+        if handler is None:
             await self._respond(
                 request_id,
                 ok=False,
                 error=f"unsupported method {method!r} (this agent advertises {CAPABILITIES})",
             )
+            return
+        try:
+            body = await handler(self, params)
+        except Exception as exc:
+            await self._respond(request_id, ok=False, error=f"{method} failed: {exc}")
+            return
+        await self._respond(request_id, ok=True, body=body)
 
     async def _handle_command(self, frame: dict) -> None:
         # M4 commands (reboot) are not built in the hub yet. Do not pretend.
@@ -367,8 +533,8 @@ class RoostClient:
                 "pid": os.getpid(),
                 "restarts": 0,
             },
-            # We do not claim `sessions`; the field is present because the fleet
-            # view reads it field-by-field, but the count is honestly zero.
+            # Overridden with the store's real counts by `_answer_status` when a
+            # store is available; the zeros here are the honest fallback else.
             "sessions": {"count": 0, "retained": 0},
             "registry": {"registered": True},
         }
@@ -420,17 +586,30 @@ class RoostBridge:
     branch on "is roost on?".
     """
 
-    def __init__(self, client: RoostClient | None = None, state: RoostState | None = None) -> None:
+    def __init__(
+        self,
+        client: RoostClient | None = None,
+        state: RoostState | None = None,
+        history: HistoryProvider | None = None,
+    ) -> None:
         self.state = state or RoostState()
         self._client = client
+        # The task store the history methods read. The bridge does not read it
+        # itself; it only carries it to the client (so `create_app` can build all
+        # of roost's parts in one place).
+        self._history = history
+        if client is not None:
+            client.set_history(history)
 
     @classmethod
-    def from_env(cls, *, agent_name: str) -> RoostBridge:
+    def from_env(
+        cls, *, agent_name: str, history: HistoryProvider | None = None
+    ) -> RoostBridge:
         config = RoostConfig.from_env(agent_name=agent_name)
         if config is None:
-            return cls()
+            return cls(history=history)
         state = RoostState()
-        return cls(client=RoostClient(config, state=state), state=state)
+        return cls(client=RoostClient(config, state=state), state=state, history=history)
 
     @property
     def enabled(self) -> bool:
