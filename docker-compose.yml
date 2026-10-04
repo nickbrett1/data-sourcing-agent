@@ -42,6 +42,9 @@ services:
       - ${AGENT_STATE_HOST_DIR:-./state}:/state
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
+      # Homepage group: kept as "Services". nas-reach-mcp chose "MCP Servers",
+      # but this is an A2A agent (a service on `ai_proxy`), not an MCP server, so
+      # "Services" is the honest group. Decision recorded in deploy/README.md §9.
       - "homepage.group=Services"
       - "homepage.name=data-sourcing-agent"
       - "homepage.href=http://nas:8700/"
