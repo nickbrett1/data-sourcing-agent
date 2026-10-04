@@ -10,6 +10,11 @@
 FROM python:3.12-slim AS build
 WORKDIR /app
 COPY README.md pyproject.toml* requirements.txt* ./
+# The project declares BOTH packages (`data_sourcing_agent` under src/ and the
+# top-level `agent` package the image runs), and `pip install .` below resolves
+# them — so both must exist before it runs. src/ is stubbed; agent/ is the real
+# code and is copied here rather than waiting for the `COPY . .` below.
+COPY agent ./agent
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
     && mkdir -p src/data_sourcing_agent && touch src/data_sourcing_agent/__init__.py \
