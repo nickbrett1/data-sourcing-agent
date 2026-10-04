@@ -22,6 +22,7 @@ It registers itself with the LiteLLM gateway on startup.
 | `agent/card.py`          | the card's skills                                                |
 | `agent/headers.py`       | forwarding of the `X-LiteLLM-*` context headers                  |
 | `agent/register.py`      | startup self-registration (idempotent, fail-open)                |
+| `agent/roost.py`         | the roost fleet client (reconnecting WebSocket, fail-open)       |
 | `prompts/instructions.md`| the agent's instructions — **human-owned, never overwritten**    |
 | `agent/.env.example`     | the environment the container reads                              |
 
@@ -94,6 +95,58 @@ registration still succeeds, only the fallback is weakened.
 **One card field the container cannot own: access groups.** `agent_access_groups`
 is dashboard-only — the API accepts the field and silently drops it. Group-based
 agent permissions remain a manual dashboard step per agent.
+
+## roost (fleet visibility)
+
+[roost](https://github.com/nickbrett1/roost) is the fleet mission-control hub.
+It is **not** the LiteLLM gateway registry: the gateway answers *"who can I route
+a task to?"* and roost answers *"what is every agent doing right now?"*. This
+agent is registered with the gateway already; `agent/roost.py` is what makes it
+visible in roost's fleet view. When `ROOST_HUB_URL` is set, the client dials the
+hub on startup and holds one long-lived outbound WebSocket open at `/agent/ws`.
+
+The runtime agent is a Pydantic AI server, not an `a2a-goose` process, so it
+cannot reuse the dev agent's `hub:` config block - it needs this client. It is
+the first Python implementation of roost protocol v1 (the other is Rust, inside
+`a2a-goose`), so `tests/test_roost.py` pins every frame shape the client emits.
+
+### What it claims, and what it does not
+
+`hello` advertises `capabilities: ["activity", "status"]` and `kind:
+"pydantic-agent"`. It deliberately does **not** claim `sessions` / `history`:
+this agent has no goose `sessions.db`, so answering `history.*` would mean
+inventing a second transcript store and a second schema. Claim only what you can
+serve. `status.get` is answered by a read loop that never awaits a model call, so
+a long turn cannot make the hub's ~15 s poll time out (three missed polls and the
+hub drops the tunnel). The client reconnects with backoff **forever** and is
+**fail-open**: a roost outage is logged and retried in the background and never
+stops the agent serving.
+
+### What has to be set at deploy time
+
+| Variable          | Meaning                                                                    |
+| ----------------- | -------------------------------------------------------------------------- |
+| `ROOST_HUB_URL`   | The hub to dial, e.g. `ws://<address>:3008/agent/ws`. **No default.**     |
+| `ROOST_AGENT_ID`  | Blank derives it from the agent name; must match the hub's token key, if the hub enforces tokens. |
+| `ROOST_TOKEN_ENV` | The *name* of the variable holding the bearer token (default `ROOST_AGENT_TOKEN`). |
+| `ROOST_AGENT_TOKEN` | The bearer token value (a secret - from Doppler, never the image). Only needed if the hub sets `ROOST_AGENT_TOKENS`. |
+| `ROOST_ENABLED`   | `false` keeps the URL but never dials.                                     |
+
+**Why `ROOST_HUB_URL` has no default, and cannot have one.** roost runs on
+`roost_default`; this container runs on `ai_proxy`. From `ai_proxy`, neither
+`roost` nor `nas` resolves (both are concepts of other networks). So no address
+is derivable at build time, and a guessed one is a silent misconfiguration. Pick
+one at deploy time:
+
+| Address from an `ai_proxy` container | Trade-off                                                            |
+| ------------------------------------ | ------------------------------------------------------------------- |
+| `ws://172.21.0.1:3008/agent/ws` (host gateway IP) | Works today; the bridge subnet is an implementation detail that can change. |
+| `ws://roost:3000/agent/ws` (attach roost to `ai_proxy`) | Cleanest; needs a **roost-side** compose change (out of scope here). |
+| `ws://roost:3000/agent/ws` (attach this agent to `roost_default`) | Keeps roost untouched; couples this agent to roost's network. |
+| `wss://<nas-tailnet-name>:3008/agent/ws` | Matches how the Mac Studio agents already reach it. |
+
+With `ROOST_HUB_URL` unset the client is not built at all, so an agent that is
+not yet wired for roost behaves exactly as before.
 
 ## Protocol version
 

@@ -19,7 +19,13 @@ dependencies = [
     "starlette>=0.37",
     "sse-starlette>=2.0",
     "uvicorn>=0.30",
-    "httpx>=0.27"
+    "httpx>=0.27",
+    # The roost fleet client (agent/roost.py) speaks roost protocol v1 over a
+    # long-lived outbound WebSocket. Declared explicitly rather than relying on
+    # it as a transitive of something else (it is only pulled in by google-genai
+    # today, which nothing here depends on). `>=14` because this is the first
+    # version whose client takes `additional_headers` (the kwarg the client uses).
+    "websockets>=14"
 ]
 
 [project.optional-dependencies]
@@ -45,7 +51,13 @@ data_sourcing_agent = "src/data_sourcing_agent"
 agent = "agent"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# `agent/` is a first-class test root alongside `tests/`: it is the code the
+# image runs, and the roost client (`agent/roost.py`) is the most
+# protocol-sensitive module in the repo. Tests still live in `tests/` (they
+# import `agent` via `pythonpath` below), but naming `agent` here means a test
+# co-located with the code it exercises is collected rather than silently
+# ignored - which is exactly the blind spot this widening exists to close.
+testpaths = ["tests", "agent"]
 # Make the top-level `agent` package importable from the tests without an
 # install, so the tests exercise the code the image runs.
 pythonpath = ["."]
