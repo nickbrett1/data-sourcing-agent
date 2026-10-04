@@ -1,0 +1,90 @@
+{
+  "name": "data-sourcing-agent",
+  "runArgs": [
+    "--name",
+    "data-sourcing-agent-devcontainer",
+    "--sysctl",
+    "net.ipv6.conf.all.disable_ipv6=1",
+    "--cap-add=NET_ADMIN",
+    "--device=/dev/net/tun",
+    "--stop-timeout",
+    "30"
+  ],
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "workspaceFolder": "/workspaces/data-sourcing-agent",
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "installZsh": true,
+      "configureZshAsDefaultShell": true,
+      "installOhMyZsh": true,
+      "upgradePackages": true,
+      "username": "vscode"
+    },
+    "ghcr.io/devcontainers-extra/features/apt-packages:1": {
+      "packages": "socat"
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.12"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    }
+  },
+  "mounts": [
+    "source=data-sourcing-agent-tailscale-state,target=/var/lib/tailscale,type=volume",
+    "source=${localEnv:HOME}/.doppler,target=/home/vscode/.doppler,type=bind",
+    "source=gemini-cli-settings,target=/home/vscode/.gemini,type=volume",
+    "source=${localEnv:HOME}/.ssh,target=/home/vscode/.ssh,type=bind"
+  ],
+  "forwardPorts": [],
+  "containerEnv": {
+    "LANG": "en_US.UTF-8",
+    "LC_ALL": "en_US.UTF-8"
+  },
+  "remoteEnv": {
+    "PATH": "${containerWorkspaceFolder}/.venv/bin:${containerEnv:PATH}"
+  },
+  "postCreateCommand": "bash .devcontainer/post-create-setup.sh",
+  "postStartCommand": "bash /workspaces/data-sourcing-agent/.devcontainer/post-start-setup.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "pcassidy75.tmux-integrated",
+        "vsc-mermaid.mermaid-preview",
+        "doppler.doppler-vscode",
+        "saoudrizwan.claude-dev",
+        "GitHub.copilot",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "svelte.svelte-vscode",
+        "usernamehw.errorlens",
+        "streetsidesoftware.code-spell-checker",
+        "eamodio.gitlens",
+        "donjayamanne.githistory",
+        "mhutchie.git-graph",
+        "redhat.vscode-yaml",
+        "tamasfe.even-better-toml",
+        "bierner.markdown-mermaid",
+        "pomdtr.excalidraw-editor",
+        "pejmannikram.vscode-auto-scroll",
+        "naumovs.color-highlight",
+        "oderwat.indent-rainbow",
+        "wix.vscode-import-cost",
+        "mkxml.vscode-filesize",
+        "christian-kohler.npm-intellisense",
+        "GitHub.vscode-pull-request-github",
+        "shyykoserhiy.git-autoconfig",
+        "actboy168.tasks",
+        "humao.rest-client",
+        "alefragnani.project-manager",
+        "mutantdino.resourcemonitor",
+        "ms-azuretools.vscode-docker",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff"
+      ]
+    }
+  }
+}

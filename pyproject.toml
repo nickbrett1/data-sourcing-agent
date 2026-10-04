@@ -1,0 +1,43 @@
+[project]
+name = "data-sourcing-agent"
+version = "0.1.0"
+description = "A data-sourcing-agent project generated with genproj"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic-ai>=2.40",
+    "fasta2a[pydantic-ai]>=2.0",
+    "uvicorn>=0.30"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4"
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+src = ["src", "tests"]
+# Pin the language level. Without it ruff infers target-version from
+# requires-python, and target-gated rules (e.g. UP017 "use datetime.UTC") then
+# switch on or off depending on how the config resolved.
+target-version = "py311"
+
+[tool.ruff.lint]
+# Pin the enforced rule set. Without an explicit select the enabled set is
+# whatever ruff's built-in default is for the resolved target version, which
+# also drifts between ruff releases - so the same source could pass locally
+# and fail in CI (or vice versa). Written down here so `ruff check src tests`
+# is deterministic and local lint agrees with CI. Update `select` (or add
+# `ignore`) deliberately when you want a different rule set.
+select = ["E4", "E7", "E9", "F", "B", "I", "UP"]

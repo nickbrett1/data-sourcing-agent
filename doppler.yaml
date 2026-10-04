@@ -1,0 +1,3 @@
+setup:
+  project: data-sourcing-agent
+  config: dev
