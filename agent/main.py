@@ -18,30 +18,36 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fasta2a import FastA2A, InMemoryBroker, InMemoryStorage
+from fasta2a import FastA2A
+from fasta2a.broker import InMemoryBroker
 from fasta2a.pydantic_ai import worker_lifespan
-from pydantic_ai import Agent
+from fasta2a.storage import InMemoryStorage
+from pydantic_ai import Agent, ModelSettings, PromptedOutput
+from pydantic_ai.mcp import MCPToolset
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from agent.card import AGENT_SKILLS
-from agent.contract import AgentResult, validate_agent_result
+from agent.contract import validate_agent_result
 from agent.headers import HeaderForwardingWorker, LiteLLMHeaderMiddleware
 from agent.model import build_model
-from pydantic_ai.mcp import MCPToolset
 from agent.register import register_with_litellm
+from agent.ticket import TicketProposal
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 INSTRUCTIONS_PATH = PACKAGE_ROOT.parent / "prompts" / "instructions.md"
 
 AGENT_NAME = "data-sourcing-agent"
-AGENT_DESCRIPTION = "Turns a fuzzy market-data need into a validated, costed Databento download ticket (requests/*.yaml) for human sign-off. Drafts only: it cannot spend credit, cannot approve a request, and is not the authority on whether a request is legal - the validator tool is. Covers Databento historical US equities, futures and options datasets."
+AGENT_DESCRIPTION = "Turns a fuzzy market-data need into a validated, costed Databento download ticket (requests/*.yaml) for human sign-off. Drafts only: it cannot spend credit, cannot approve a request, and is not the authority on whether a request is legal - a deterministic validator asks the Databento API. Covers Databento historical US equities, futures and options datasets."
 PROTOCOL_VERSION = "1.0"
-# The URL the card advertises - the address the LiteLLM proxy dials. It must be
-# reachable from the proxy's host, so it is an address, not a loopback name.
-CARD_URL = os.environ.get("A2A_CARD_URL", "http://0.0.0.0:8700")
+# The URL the card advertises — the address the LiteLLM proxy DIALS, from its
+# own vantage on `ai_proxy`. `0.0.0.0` is a *bind* address: the proxy reading it
+# would dial itself, so registration would succeed and invocation would fail.
+# The container's own name on `ai_proxy` is what the proxy's embedded DNS
+# resolves, so that is the default. See the handover memo §4.
+CARD_URL = os.environ.get("A2A_CARD_URL", "http://data-sourcing-agent:8700")
 
 
 def _load_instructions() -> str:
@@ -52,7 +58,7 @@ def _load_instructions() -> str:
     """
     if INSTRUCTIONS_PATH.exists():
         return INSTRUCTIONS_PATH.read_text(encoding="utf-8")
-    return "You are the front desk for Databento historical downloads. Turn a human's intent into a draft YAML ticket under requests/. You never mark a ticket approved, never raise cost.max_usd, and never declare a request valid or a cost known - only the deterministic validator tool may, and only a human signs off on spend. When any required slot (dataset, schema, symbols, stype_in, start, end, why, max_usd) is ambiguous, ask before drafting."
+    return "You are the front desk for Databento historical downloads. Turn a human's intent into a draft download ticket. You never mark a ticket approved, never raise cost.max_usd, and never declare a request valid or a cost known - the deterministic Validator asks the Databento API, and only a human signs off on spend. `stype_in` is one of raw_symbol, parent, continuous, instrument_id, and you must not guess it. `why` is mandatory."
 
 
 AGENT_TOOLSETS = [
@@ -62,7 +68,17 @@ AGENT_TOOLSETS = [
 agent = Agent(
     build_model(),
     instructions=_load_instructions(),
-    output_type=AgentResult,
+    # `PromptedOutput`, NOT the default `ToolOutput`: `deepseek-v4-flash` is a
+    # thinking model and refuses a forced `tool_choice` ("Thinking mode does not
+    # support this tool_choice"), and the gateway's provider rejects a
+    # `json_schema` response_format ("This response_format type is unavailable
+    # now"). PromptedOutput asks for JSON in the prompt and parses it — verified
+    # to round-trip on this alias (handover memo §5.1). `NativeOutput` fails; do
+    # not "upgrade" to it without re-testing.
+    output_type=PromptedOutput(TicketProposal),
+    # Reasoning tokens bill against `max_tokens` on this model, so a low cap
+    # truncates the answer before it is emitted. The default is too small.
+    model_settings=ModelSettings(max_tokens=4096),
     retries={"output": 3},
     toolsets=AGENT_TOOLSETS,
 )
