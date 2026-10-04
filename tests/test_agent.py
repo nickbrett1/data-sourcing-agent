@@ -224,3 +224,38 @@ def test_card_url_is_a_dial_address_not_a_bind_address():
 
     assert main.CARD_URL != "http://0.0.0.0:8700"
     assert "0.0.0.0" not in main.CARD_URL
+
+
+def test_served_card_declares_the_wire_the_server_speaks():
+    """The card's interface version must match the JSON-RPC dialect FastA2A speaks.
+
+    FastA2A 2.0.1 accepts the 0.3 dialect (`message/send`, `tasks/get`, ...) but
+    hard-codes its interface's `protocolVersion` to "1.0". An a2a-sdk client —
+    which is what the LiteLLM gateway uses to invoke us — reads that field to
+    choose its transport, picks the 1.0 one, sends `SendMessage`, and is
+    rejected by this server. The served card must therefore say "0.3", so the
+    gateway selects the compatible transport.
+    """
+    import json
+
+    from starlette.requests import Request
+
+    from agent import main
+
+    app = main.create_app()
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/.well-known/agent-card.json",
+            "headers": [],
+        }
+    )
+    response = asyncio.run(app._agent_card_endpoint(request))
+    card = json.loads(response.body)
+    jsonrpc = [i for i in card["supportedInterfaces"] if i["protocolBinding"] == "JSONRPC"]
+    assert jsonrpc, "the card must advertise a JSONRPC interface"
+    assert all(i["protocolVersion"] == "0.3" for i in jsonrpc)
+    # The client-facing version is pinned separately and is deliberately not
+    # changed by this fix.
+    assert main.PROTOCOL_VERSION == "1.0"
