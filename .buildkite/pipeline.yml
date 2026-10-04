@@ -87,7 +87,11 @@ steps:
           exit 0
         fi
         docker buildx create --bootstrap --name "$$BUILDX_BUILDER_NAME" >/dev/null
+        # Stamp the revision so a deploy can be verified against a commit
+        # (memos/open-questions-agent-platform §5.G). The Dockerfile already
+        # sets org.opencontainers.image.source, so this completes the pair.
         docker buildx build --builder "$$BUILDX_BUILDER_NAME" --platform linux/amd64 \
           --cache-from type=registry,ref=$$CACHE_REF \
           --cache-to type=registry,ref=$$CACHE_REF,mode=max \
+          --label org.opencontainers.image.revision=$$BUILDKITE_COMMIT \
           -t $$IMAGE:$$BUILDKITE_COMMIT -t $$IMAGE:latest --push .
