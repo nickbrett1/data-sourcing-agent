@@ -226,6 +226,159 @@ def test_card_url_is_a_dial_address_not_a_bind_address():
     assert "0.0.0.0" not in main.CARD_URL
 
 
+# --- non-request turns (greetings) never reach the ticket machinery -----------
+
+
+def test_intent_classifier_separates_greetings_from_requests():
+    """The classifier is the fix's whole decision; pin its two sides.
+
+    A greeting has no dataset/schema/symbol intent and must not be handed to the
+    `TicketProposal` contract. A real request must still be, or the ticket path
+    would be broken by the fix instead of the greeting.
+    """
+    from agent.intent import is_data_request
+
+    for greeting in ["Hello", "hi there", "HELLO", "Good morning!", "thanks!"]:
+        assert is_data_request(greeting) is False, greeting
+
+    for request_text in [
+        "One day of the SPY options chain.",
+        "One day of the SPY chain.",
+        "Download XNAS.ITCH trades for 2026-10-01.",
+        "I need ohlcv-1d bars for ALL_SYMBOLS.",
+        "Pull the GLBX.MDP3 futures for last week.",
+    ]:
+        assert is_data_request(request_text) is True, request_text
+
+
+def _no_run_agent():
+    """A stub whose `run` fails the test if the model is ever invoked.
+
+    For a greeting the executor must answer without running the agent at all;
+    reaching `run` is the regression (it is what exhausted the output retries).
+    """
+    class _NoRun:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def run(self, prompt):  # noqa: ARG002
+            raise AssertionError("the model must not run for a non-request turn")
+
+    return _NoRun()
+
+
+def _app_with_no_run():
+    from agent import main
+
+    stub = _no_run_agent()
+    return main.create_app(
+        agent_executor=main.TicketAgentExecutor(stub), agent_instance=stub
+    )
+
+
+def test_greeting_completes_with_a_message_and_no_artifact():
+    """A greeting must complete normally, never fabricate a ticket.
+
+    The regression this pins: forcing "Hello" through `PromptedOutput(TicketProposal)`
+    either exhausted the output retries (`TASK_STATE_FAILED`) or invented a
+    placeholder `XNAS.ITCH`/`ALL_SYMBOLS`/`ohlcv-1d` ticket. Success is a completed
+    task carrying a normal assistant message and NO artifact.
+    """
+    from a2a.helpers.proto_helpers import new_text_part
+    from a2a.types.a2a_pb2 import Message, Role, SendMessageRequest
+    from google.protobuf.json_format import MessageToDict
+    from starlette.testclient import TestClient
+
+    params = MessageToDict(
+        SendMessageRequest(
+            message=Message(
+                message_id="m1",
+                role=Role.ROLE_USER,
+                parts=[new_text_part("Hello")],
+            )
+        )
+    )
+    body = {"jsonrpc": "2.0", "id": "1", "method": "SendMessage", "params": params}
+
+    with TestClient(_app_with_no_run()) as client:
+        response = client.post("/", json=body, headers={"A2A-Version": "1.0"})
+
+    assert response.status_code == 200
+    task = response.json()["result"]["task"]
+    assert task["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert task.get("artifacts", []) == [], "a greeting must not produce an artifact"
+    reply = task["status"]["message"]["parts"][0]["text"]
+    assert "market data" in reply.lower()
+
+
+def test_greeting_over_v03_message_send_completes_without_an_artifact():
+    """The legacy transport the gateway uses must also short-circuit.
+
+    `message/send` is the dialect the LiteLLM gateway currently speaks; the
+    greeting fix must hold there too, not only on the native 1.0 wire.
+    """
+    from a2a.compat.v0_3 import types as v03
+    from starlette.testclient import TestClient
+
+    params = v03.MessageSendParams(
+        message=v03.Message(
+            message_id="m1",
+            role=v03.Role.user,
+            parts=[v03.Part(root=v03.TextPart(text="Hello"))],
+        ),
+        configuration=v03.MessageSendConfiguration(blocking=True),
+    )
+    body = {
+        "jsonrpc": "2.0",
+        "id": "2",
+        "method": "message/send",
+        "params": params.model_dump(by_alias=True, exclude_none=True),
+    }
+
+    with TestClient(_app_with_no_run()) as client:
+        response = client.post("/", json=body)
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["status"]["state"] == "completed"
+    assert result.get("artifacts", []) == []
+    assert result["status"]["message"]["parts"][0]["kind"] == "text"
+
+
+def test_data_request_still_yields_the_ticket_artifact():
+    """A real request is untouched: it still produces the rendered ticket.
+
+    The other half of the fix. Without this, a pre-check that rejected
+    everything would look green on the greeting test alone.
+    """
+    from a2a.helpers.proto_helpers import new_text_part
+    from a2a.types.a2a_pb2 import Message, Role, SendMessageRequest
+    from google.protobuf.json_format import MessageToDict
+    from starlette.testclient import TestClient
+
+    params = MessageToDict(
+        SendMessageRequest(
+            message=Message(
+                message_id="m1",
+                role=Role.ROLE_USER,
+                parts=[new_text_part("One day of the SPY options chain.")],
+            )
+        )
+    )
+    body = {"jsonrpc": "2.0", "id": "1", "method": "SendMessage", "params": params}
+
+    with TestClient(_app_with_stub()) as client:
+        response = client.post("/", json=body, headers={"A2A-Version": "1.0"})
+
+    task = response.json()["result"]["task"]
+    assert task["status"]["state"] == "TASK_STATE_COMPLETED"
+    texts = [p["text"] for a in task["artifacts"] for p in a["parts"] if "text" in p]
+    assert any("state: draft" in t for t in texts)
+
+
 def _stub_agent():
     """A stand-in for the Pydantic AI agent: runs offline, returns a Ticket."""
     from types import SimpleNamespace

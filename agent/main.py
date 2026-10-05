@@ -46,6 +46,7 @@ from agent.card import AGENT_SKILLS, build_agent_card
 from agent.contract import validate_agent_result
 from agent.headers import capture_litellm_headers
 from agent.history import TaskHistory, build_task_store
+from agent.intent import NON_REQUEST_REPLY, is_data_request
 from agent.model import build_model
 from agent.register import register_with_litellm
 from agent.roost import RoostBridge
@@ -163,7 +164,20 @@ class TicketAgentExecutor(AgentExecutor):
         self._roost.turn_started()
         await self._roost.emit("turn_started", taskId=context.task_id)
         try:
-            result = await self._agent.run(context.get_user_input())
+            user_input = context.get_user_input()
+            # A turn that is not a data request (a greeting, thanks, small talk)
+            # has no `TicketProposal` to make. Forcing it through
+            # `PromptedOutput(TicketProposal)` is what produced the two observed
+            # failures: output retries exhausted (TASK_STATE_FAILED) or a
+            # fabricated placeholder ticket. Answer it conversationally instead,
+            # before the model runs, and leave the ticket path untouched for
+            # real requests. The check is deterministic; see agent/intent.py.
+            if not is_data_request(user_input):
+                await updater.complete(
+                    updater.new_agent_message([new_text_part(NON_REQUEST_REPLY)])
+                )
+                return
+            result = await self._agent.run(user_input)
             ticket = result.output
             rendered = render_ticket_yaml(ticket)
         except Exception as exc:  # a failed turn is a failed task, not a crash
