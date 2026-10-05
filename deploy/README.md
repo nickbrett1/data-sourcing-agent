@@ -62,6 +62,30 @@ prerequisites.
 
 For non-Synology hosts: `docker compose up -d`.
 
+### Gate the deploy on reachability
+
+`docker compose up -d` returning is **not** proof the agent works: registration
+can be green while the URL on the card is one the caller cannot dial (a
+`0.0.0.0` bind address, or a name that resolves here and not on the caller's
+network). Confirm it, and fail the deploy if not:
+
+```sh
+./scripts/deploy-gate.sh
+```
+
+The script brings the project up, waits for the agent to start answering (a
+freshly-created container is "not up", not "unreachable"), then runs the scoped
+probe `python -m agent.probe --agent data-sourcing-agent`, which dials the
+advertised card URL **from the caller's vantage** and checks the served card
+agrees with the registration. It exits non-zero if the agent is undialable,
+unreachable, or not registered — so it can gate a manual deploy *or* an
+auto-update. Set `LITELLM_MASTER_KEY` in the environment to have it list the
+whole fleet; otherwise the container's own key is used (it owns its agent).
+
+Run it on the **NAS** (next to the containers), not in CI: the caller dials
+container names that resolve only on the `ai_proxy` network, which a CI runner
+is not on.
+
 ## 3. Auto-updates with Watchtower (poll model)
 
 Watchtower on the NAS polls the registry and recreates the container when the
