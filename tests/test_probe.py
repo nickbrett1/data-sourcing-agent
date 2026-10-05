@@ -289,6 +289,40 @@ def test_probe_flags_a_non_2xx_card():
     assert asyncio.run(probe(key="k", transport=transport))[0].verdict == UNREACHABLE
 
 
+def test_probe_only_probes_the_named_agents():
+    registry = {
+        "agents": [
+            {
+                "agent_id": "a",
+                "agent_name": "mine",
+                "agent_card_params": {
+                    "url": "http://mine:8700",
+                    "protocolVersion": "1.0",
+                },
+            },
+            {
+                "agent_id": "b",
+                "agent_name": "theirs",
+                "agent_card_params": {
+                    "url": "http://dead:8700",
+                    "protocolVersion": "1.0",
+                },
+            },
+        ]
+    }
+    transport = _transport(
+        registry=registry,
+        cards={
+            "http://mine:8700/.well-known/agent-card.json": httpx.Response(
+                200, json=_card(name="mine", url="http://mine:8700")
+            )
+        },
+    )
+    findings = asyncio.run(probe(key="k", transport=transport, only=["mine"]))
+    assert [f.registration.name for f in findings] == ["mine"]
+    assert findings[0].verdict == OK
+
+
 # --- main (exit code) ---------------------------------------------------------
 
 
@@ -335,3 +369,59 @@ def test_main_exits_nonzero_on_a_failing_agent(monkeypatch):
 
     monkeypatch.setattr("agent.probe.probe", fake_probe)
     assert asyncio.run(main([])) == 1
+
+
+def _scoped_fake(transport):
+    async def fake_probe(**kwargs):
+        return await probe(key="k", transport=transport, only=kwargs.get("only"))
+
+    return fake_probe
+
+
+def test_main_scopes_to_the_named_agent(monkeypatch):
+    registry = {
+        "agents": [
+            {
+                "agent_id": "a",
+                "agent_name": "mine",
+                "agent_card_params": {
+                    "url": "http://mine:8700",
+                    "protocolVersion": "1.0",
+                },
+            },
+            {
+                "agent_id": "b",
+                "agent_name": "theirs",
+                "agent_card_params": {
+                    "url": "http://dead:8700",
+                    "protocolVersion": "1.0",
+                },
+            },
+        ]
+    }
+    transport = _transport(
+        registry=registry,
+        cards={
+            "http://mine:8700/.well-known/agent-card.json": httpx.Response(
+                200, json=_card(name="mine", url="http://mine:8700")
+            )
+        },
+    )
+    monkeypatch.setattr("agent.probe.probe", _scoped_fake(transport))
+    # "theirs" is down, but scoping to "mine" must not fail on it.
+    assert asyncio.run(main(["--agent", "mine"])) == 0
+
+
+def test_main_fails_when_the_named_agent_is_not_registered(monkeypatch):
+    registry = {
+        "agents": [
+            {
+                "agent_id": "a",
+                "agent_name": "other",
+                "agent_card_params": {"url": "http://other:8700"},
+            }
+        ]
+    }
+    transport = _transport(registry=registry, cards={})
+    monkeypatch.setattr("agent.probe.probe", _scoped_fake(transport))
+    assert asyncio.run(main(["--agent", "mine"])) == 1
