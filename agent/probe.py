@@ -63,6 +63,15 @@ CARD_PATH = "/.well-known/agent-card.json"
 DEFAULT_BASE_URL = "http://litellm:4000"
 DEFAULT_TIMEOUT = 5.0
 
+# The registry read gets its own, more generous timeout. It is a control-plane
+# call to the proxy, whose *first* request after a restart can exceed the short
+# per-card timeout (observed: a cold `GET /v1/agents` ReadTimeout at 5 s while a
+# warm one answered in milliseconds). A deploy gate that flakes on a cold proxy
+# is worse than useless, so the registry read is slower and retried once, while
+# the per-card dials stay short — reachability is still a quick yes/no.
+REGISTRY_TIMEOUT = 15.0
+REGISTRY_ATTEMPTS = 2
+
 # Verdicts, worst first. `OK` is the only good one.
 OK = "OK"
 MISMATCH = "MISMATCH"
@@ -316,15 +325,38 @@ async def probe(
     headers = {"Authorization": f"Bearer {key}"} if key else {}
 
     async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
-        response = await client.get(
-            f"{base_url.rstrip('/')}/v1/agents", headers=headers
+        response = await _read_registry(
+            client, f"{base_url.rstrip('/')}/v1/agents", headers
         )
-        response.raise_for_status()
         registrations = parse_registry(response.json())
         if only:
             wanted = set(only)
             registrations = [reg for reg in registrations if reg.name in wanted]
         return [await _dial(client, reg, card_path) for reg in registrations]
+
+
+async def _read_registry(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict,
+    attempts: int = REGISTRY_ATTEMPTS,
+) -> httpx.Response:
+    """Read the registry, retrying a cold proxy's slow first response.
+
+    Retried because the failure being avoided is transient (a proxy that has not
+    served a request yet), and re-raised when it is not, so `main` still reports
+    an unreadable registry distinctly (exit 2) rather than as a fleet finding.
+    """
+    last: Exception | None = None
+    for _ in range(max(1, attempts)):
+        try:
+            response = await client.get(url, headers=headers, timeout=REGISTRY_TIMEOUT)
+            response.raise_for_status()
+            return response
+        except Exception as exc:
+            last = exc
+    assert last is not None  # attempts >= 1, so a failure set it
+    raise last
 
 
 def _format_report(findings: list[Finding]) -> str:

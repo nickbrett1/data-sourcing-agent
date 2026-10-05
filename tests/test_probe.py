@@ -425,3 +425,44 @@ def test_main_fails_when_the_named_agent_is_not_registered(monkeypatch):
     transport = _transport(registry=registry, cards={})
     monkeypatch.setattr("agent.probe.probe", _scoped_fake(transport))
     assert asyncio.run(main(["--agent", "mine"])) == 1
+
+
+def test_probe_retries_a_cold_registry_read():
+    """A cold proxy's first `GET /v1/agents` may time out; one retry must recover."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/agents":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ReadTimeout("cold proxy")
+            return httpx.Response(
+                200,
+                json={
+                    "agents": [
+                        {
+                            "agent_id": "a",
+                            "agent_name": "x",
+                            "agent_card_params": {
+                                "url": "http://x:8700",
+                                "protocolVersion": "1.0",
+                            },
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(200, json=_card(name="x", url="http://x:8700"))
+
+    findings = asyncio.run(probe(key="k", transport=httpx.MockTransport(handler)))
+    assert calls["n"] == 2
+    assert [f.verdict for f in findings] == [OK]
+
+
+def test_probe_raises_when_the_registry_is_unreadable():
+    """A persistent failure must still surface, so `main` reports exit 2, not a fleet finding."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("still cold")
+
+    with pytest.raises(httpx.ReadTimeout):
+        asyncio.run(probe(key="k", transport=httpx.MockTransport(handler)))
