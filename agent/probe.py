@@ -32,7 +32,10 @@ reaches the fleet over the same `ai_proxy` network:
     docker compose run --rm app python -m agent.probe
 
 It exits non-zero if any agent is undialable, unreachable, or serving a card
-that disagrees with its registration, so it can gate a deploy.
+that disagrees with its registration, so it can gate a deploy. In a deploy,
+scope it to the agent being deployed — `python -m agent.probe --agent <name>` —
+so an unrelated agent's outage cannot fail this one's release, while a name that
+is not registered at all still fails it.
 
 What "dialable" proves: the well-known card and the JSON-RPC endpoint are the
 same host and port, so a successful card fetch is proof the caller can reach the
@@ -48,6 +51,7 @@ import os
 import sys
 import time
 import urllib.parse
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import httpx
@@ -287,12 +291,19 @@ async def probe(
     timeout: float = DEFAULT_TIMEOUT,
     transport: httpx.AsyncBaseTransport | None = None,
     card_path: str = CARD_PATH,
+    only: Sequence[str] | None = None,
 ) -> list[Finding]:
     """Read the registry, dial every advertised URL, and report per agent.
 
     `transport` is an injection point for tests: the probe talks to the network
     and the tests must not, so the whole registry-and-dial flow is driven through
     an `httpx.MockTransport` (the same pattern as the Validator's tests).
+
+    `only` restricts the probe to the named agents, so a deploy can gate on its
+    **own** reachability without failing because an unrelated agent is down. A
+    name in `only` that is not in the registry is not silently ignored - the
+    caller (see `main`) reports it as a failure, because "my agent is not
+    registered" is exactly what a deploy gate is for.
     """
     base_url = base_url or os.environ.get("LITELLM_BASE_URL", DEFAULT_BASE_URL)
     if key is None:
@@ -310,6 +321,9 @@ async def probe(
         )
         response.raise_for_status()
         registrations = parse_registry(response.json())
+        if only:
+            wanted = set(only)
+            registrations = [reg for reg in registrations if reg.name in wanted]
         return [await _dial(client, reg, card_path) for reg in registrations]
 
 
@@ -360,28 +374,55 @@ async def main(argv: list[str] | None = None) -> int:
         "--key", default=None, help="master key (default: $LITELLM_MASTER_KEY)"
     )
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    parser.add_argument(
+        "--agent",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "only probe this agent (repeatable). Use in a deploy to gate on this "
+            "agent's own reachability without failing on an unrelated agent's "
+            "outage; a name that is not registered is reported as a failure."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
         findings = await probe(
-            base_url=args.base_url, key=args.key, timeout=args.timeout
+            base_url=args.base_url,
+            key=args.key,
+            timeout=args.timeout,
+            only=args.agent,
         )
     except Exception as exc:
         print(f"probe failed to read the registry: {exc!r}", file=sys.stderr)
         return 2
 
-    if not findings:
+    seen = {finding.registration.name for finding in findings}
+    missing = [name for name in (args.agent or []) if name not in seen]
+
+    if not findings and not missing:
         print("the registry is empty - nothing to probe")
         return 0
 
-    print(_format_report(findings))
-    failing = [f for f in findings if not f.ok]
-    if failing:
-        print(
-            f"\n{len(failing)}/{len(findings)} agents are not dialable/consistent "
-            "from this vantage.",
-            file=sys.stderr,
-        )
+    if findings:
+        print(_format_report(findings))
+    for name in missing:
+        print(f"  {name}: not present in the registry", file=sys.stderr)
+
+    failing = [finding for finding in findings if not finding.ok]
+    if failing or missing:
+        if failing:
+            print(
+                f"\n{len(failing)}/{len(findings)} agents are not dialable/consistent "
+                "from this vantage.",
+                file=sys.stderr,
+            )
+        if missing:
+            print(
+                f"\n{len(missing)} requested agent(s) are not registered at all.",
+                file=sys.stderr,
+            )
         return 1
     print(
         f"\nall {len(findings)} agents are dialable and consistent from this vantage."
