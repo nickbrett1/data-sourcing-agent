@@ -27,8 +27,11 @@ from agent.gate import (
     GateAction,
     GatePolicy,
     GateState,
+    ask_cost_gate,
     ask_gate,
+    cost_questions,
     decide,
+    decide_cost,
     effective_action,
     escalation_cutoff,
     questions,
@@ -167,6 +170,91 @@ def test_ask_gate_runs_one_call_and_returns_answers_and_action():
     assert calls["n"] == 1
     assert decision.action is GateAction.ask_clarifying  # D2 below cut
     assert answers[D1].noul == pytest.approx(0.98)
+
+
+def test_cost_questions_fire_only_at_or_above_the_materiality_floor():
+    """D5 is absent below the floor and is the *only* question above it — the
+    post-price checkpoint asks nothing else, since D1/D2/D3 were judged upfront."""
+    assert cost_questions(None) == {}
+    assert cost_questions(0.0) == {}
+    assert cost_questions(4.99) == {}
+    assert set(cost_questions(5.0)) == {D5}
+    assert set(cost_questions(12.74)) == {D5}
+    assert cost_questions(12.74)[D5].type == "noul"
+
+
+def test_decide_cost_asks_clarifying_when_spend_is_disproportionate():
+    decision = decide_cost({D5: NoulAnswer(noul=0.20)})
+    assert decision.action is GateAction.ask_clarifying
+    assert not decision.abstained
+
+
+def test_decide_cost_proceeds_when_spend_is_proportionate():
+    decision = decide_cost({D5: NoulAnswer(noul=0.95)})
+    assert decision.action is GateAction.proceed
+
+
+def test_decide_cost_fails_open_on_a_failed_answer():
+    """A Jev outage at the cost checkpoint must not block a priced ticket."""
+    decision = decide_cost({D5: NoulAnswer(failed=True)})
+    assert decision.action is GateAction.proceed
+    assert decision.abstained is True
+    assert decide_cost({}).action is GateAction.proceed
+
+
+def test_decide_cost_is_observe_only_until_enforced():
+    decision = decide_cost({D5: NoulAnswer(noul=0.01)})
+    assert effective_action(decision) is GateAction.proceed
+    enforced = effective_action(decision, GatePolicy(enforce=True))
+    assert enforced is GateAction.ask_clarifying
+
+
+def test_ask_cost_gate_asks_only_d5_and_composes_it():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        body = json.loads(request.content)
+        assert set(body["questions"]) == {D5}  # only the cost question
+        return httpx.Response(
+            200,
+            json={
+                "model": "jev-1.13.0",
+                "answers": {D5: {"type": "noul", "noul": 0.10}},
+            },
+        )
+
+    client = JevClient(
+        base_url="http://litellm:4000",
+        api_key="k",
+        client=httpx.AsyncClient(base_url="http://litellm:4000", transport=httpx.MockTransport(handler)),
+    )
+    state = GateState(raw_request="x", parsed_intent="y", estimate_usd=50.0)
+    answers, decision = asyncio.run(ask_cost_gate(client, state, 50.0))
+    assert calls["n"] == 1
+    assert decision.action is GateAction.ask_clarifying
+    assert answers[D5].noul == pytest.approx(0.10)
+
+
+def test_ask_cost_gate_makes_no_call_below_the_floor():
+    """Below the floor there is no question to ask; the checkpoint still answers."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        calls["n"] += 1
+        return httpx.Response(200, json={"answers": {}})
+
+    client = JevClient(
+        base_url="http://litellm:4000",
+        api_key="k",
+        client=httpx.AsyncClient(base_url="http://litellm:4000", transport=httpx.MockTransport(handler)),
+    )
+    answers, decision = asyncio.run(
+        ask_cost_gate(client, GateState(raw_request="x", parsed_intent="y"), 1.0)
+    )
+    assert calls["n"] == 0
+    assert answers == {}
+    assert decision.action is GateAction.proceed
 
 
 def test_toolset_exposes_the_two_typed_tools():

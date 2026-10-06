@@ -44,8 +44,20 @@ from starlette.routing import Route
 
 from agent.card import AGENT_SKILLS, build_agent_card
 from agent.contract import validate_agent_result
-from agent.gate import DEFAULT_POLICY, ask_gate, record, serialise_state
-from agent.gatelog import append_records, build_records, default_thresholds
+from agent.gate import (
+    DEFAULT_POLICY,
+    GateState,
+    ask_cost_gate,
+    ask_gate,
+    record,
+    serialise_state,
+)
+from agent.gatelog import (
+    append_records,
+    build_records,
+    default_thresholds,
+    new_request_id,
+)
 from agent.headers import capture_litellm_headers
 from agent.history import TaskHistory, build_task_store
 from agent.intent import NON_REQUEST_REPLY, is_data_request
@@ -172,7 +184,7 @@ class TicketAgentExecutor(AgentExecutor):
         self._interpreter = interpreter
         self._jev = jev
 
-    async def _assess(self, user_input: str) -> ParsedIntent | None:
+    async def _assess(self, user_input: str, request_id: str) -> ParsedIntent | None:
         """Interpret, then gate — observe-only. Returns the reading for the ticket step.
 
         Best-effort by design: the gate is advisory and fail-open, so a failure
@@ -196,20 +208,62 @@ class TicketAgentExecutor(AgentExecutor):
                 answers, decision = await ask_gate(self._jev, state)
                 # Retain the observe-only traffic — this IS the gate's value until
                 # it enforces anything (gate memo §3/§5).
-                append_records(
-                    build_records(
-                        serialise_state(state),
-                        answers,
-                        decision,
-                        thresholds=default_thresholds(
-                            DEFAULT_POLICY.d1_cut, DEFAULT_POLICY.d2_cut, DEFAULT_POLICY.d5_cut
-                        ),
-                    )
-                )
+                self._log_gate(state, answers, decision, request_id)
                 print(f"[gate] observe-only: {record(decision)}", flush=True)
             except Exception as exc:  # the gate must never break the turn
                 print(f"[gate] skipped: {exc!r}", flush=True)
         return intent
+
+    async def _assess_cost(
+        self,
+        user_input: str,
+        intent: ParsedIntent | None,
+        ticket: object | None,
+        request_id: str,
+    ) -> None:
+        """The post-price checkpoint: fire D5 once the Validator has priced the request.
+
+        The front door runs before pricing, so D5 ("is this spend proportionate?")
+        is not answerable there and is absent from the first question set. Once the
+        ticket step has produced an estimate, the question becomes answerable and is
+        asked here — D5 alone, on the same `request_id`, so the two checkpoints of a
+        turn join in the log (memo `jev-integration-v1` §3).
+
+        Observe-only and best-effort, exactly like the front door: it logs the
+        action and never routes on it, and any failure is swallowed so it cannot
+        change the turn's outcome.
+        """
+        if self._jev is None:
+            return
+        try:
+            estimate = getattr(getattr(ticket, "cost", None), "estimate_usd", None)
+            if intent is not None:
+                state = to_gate_state(user_input, intent, estimate_usd=estimate)
+            else:
+                # No reading (interpreter absent or failed), but there is still a
+                # priced request worth judging: assemble the state from what we have.
+                state = GateState(
+                    raw_request=user_input, parsed_intent="(not parsed)", estimate_usd=estimate
+                )
+            answers, decision = await ask_cost_gate(self._jev, state, estimate)
+            self._log_gate(state, answers, decision, request_id)
+            print(f"[gate:cost] observe-only: {record(decision)}", flush=True)
+        except Exception as exc:  # the cost checkpoint must never break the turn
+            print(f"[gate:cost] skipped: {exc!r}", flush=True)
+
+    def _log_gate(self, state, answers, decision, request_id: str) -> None:
+        """Retain one checkpoint's traffic — the gate's value until it enforces (§3/§5)."""
+        append_records(
+            build_records(
+                serialise_state(state),
+                answers,
+                decision,
+                thresholds=default_thresholds(
+                    DEFAULT_POLICY.d1_cut, DEFAULT_POLICY.d2_cut, DEFAULT_POLICY.d5_cut
+                ),
+                request_id=request_id,
+            )
+        )
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         # The a2a-sdk event pipeline requires the Task to be enqueued before any
@@ -246,10 +300,16 @@ class TicketAgentExecutor(AgentExecutor):
                 return
             # Interpret, then gate — observe-only, so this cannot change the turn.
             # The reading seeds the ticket step so it does not re-derive the axes.
-            intent = await self._assess(user_input)
+            # One request id spans both gate checkpoints (front door, then post-price).
+            request_id = new_request_id()
+            intent = await self._assess(user_input, request_id)
             prompt = ticket_prompt(user_input, intent) if intent is not None else user_input
             result = await self._agent.run(prompt)
             ticket = result.output
+            # The post-price checkpoint: D5 could not be asked at the front door
+            # (no estimate yet). Now that the Validator has priced the request, it
+            # can be — observe-only, same request id.
+            await self._assess_cost(user_input, intent, ticket, request_id)
             rendered = render_ticket_yaml(ticket)
         except Exception as exc:  # a failed turn is a failed task, not a crash
             await updater.failed(

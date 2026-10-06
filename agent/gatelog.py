@@ -48,6 +48,16 @@ def _state_hash(state_text: str) -> str:
     return hashlib.sha256(state_text.encode("utf-8")).hexdigest()[:16]
 
 
+def new_request_id() -> str:
+    """A fresh request id, so the checkpoints of one turn share one `request_id`.
+
+    The gate now runs at two checkpoints (front door, then post-price for D5), and
+    their records must join. Minting the id once per turn and handing it to both is
+    what makes that a join rather than a guess (gate memo §3).
+    """
+    return uuid.uuid4().hex
+
+
 def _primitive(answer: Answer) -> str:
     if isinstance(answer, NoulAnswer):
         return "noul"

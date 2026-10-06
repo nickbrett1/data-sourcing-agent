@@ -8,6 +8,11 @@ into **one action**, in code:
 * **D3** — dataset/schema fit (Score)
 * **D5** — cost proportionality (Noul, fires only when spend is material)
 
+D1/D2/D3 are answerable at the front door, before anything is priced. **D5 is
+not** — "is this spend proportionate?" needs a number — so it is asked at a
+*second* checkpoint, `ask_cost_gate`, once the Validator has produced its
+deterministic estimate. One turn, two checkpoints, one `request_id`.
+
 **D4 is not asked.** The gate memo listed "what should the front desk do?" as a
 fifth question, but its own criteria are a pure function of D1-D3, so asking Jev
 for it would put a classifier in the loop doing arithmetic on its own upstream
@@ -101,6 +106,17 @@ class GateAction(StrEnum):
 MATERIALITY_FLOOR_USD = 5.0
 
 
+def _d5_question() -> Noul:
+    """The cost-proportionality question (D5). Built here so both checkpoints ask it identically."""
+    return Noul(
+        instructions=(
+            "The estimated spend is proportionate to the stated intent. A large "
+            "pull requested as a casual look is disproportionate; the same pull "
+            "requested as a full panel for backtesting is proportionate."
+        )
+    )
+
+
 def questions(
     estimate_usd: float | None = None,
     *,
@@ -112,7 +128,8 @@ def questions(
     **D5 is asked only when there is an estimate and it clears the materiality
     floor**, because "is the spend proportionate?" is not a question you can ask
     without a number (gate memo §2, D5). At the pre-price checkpoint the estimate
-    is absent, so D5 is simply not in the set.
+    is absent, so D5 is simply not in the set. It fires afterwards, on its own,
+    via `cost_questions`/`ask_cost_gate` once the Validator has priced the request.
     """
     qs: dict[str, Question] = {
         D1: Noul(
@@ -136,14 +153,27 @@ def questions(
         ),
     }
     if estimate_usd is not None and estimate_usd >= materiality_floor:
-        qs[D5] = Noul(
-            instructions=(
-                "The estimated spend is proportionate to the stated intent. A large "
-                "pull requested as a casual look is disproportionate; the same pull "
-                "requested as a full panel for backtesting is proportionate."
-            )
-        )
+        qs[D5] = _d5_question()
     return qs
+
+
+def cost_questions(
+    estimate_usd: float | None,
+    *,
+    materiality_floor: float = MATERIALITY_FLOOR_USD,
+) -> dict[str, Question]:
+    """D5 *alone*, for the post-price checkpoint — the question the first pass could not ask.
+
+    The front door runs before the Validator prices anything, so at that point
+    there is no number to judge proportionality against and D5 is absent from the
+    set. This is the second checkpoint: once the Validator has produced a
+    deterministic estimate, "is this spend proportionate?" becomes answerable, and
+    *only then* does it get asked. Below the materiality floor the question is not
+    worth asking and this returns empty.
+    """
+    if estimate_usd is None or estimate_usd < materiality_floor:
+        return {}
+    return {D5: _d5_question()}
 
 
 # --- the shared state (gate memo §1) -----------------------------------------
@@ -279,6 +309,42 @@ def decide(
     return GateDecision(action=GateAction.proceed, reasons=tuple(reasons))
 
 
+def decide_cost(
+    answers: dict[str, Answer],
+    policy: GatePolicy = DEFAULT_POLICY,
+) -> GateDecision:
+    """Compose **D5 alone** into an action, for the post-price checkpoint.
+
+    A separate composition from `decide` on purpose: at this checkpoint D1/D2/D3
+    are not in play — they were judged at the front door against the *unpriced*
+    request — so running them through `decide` would make every cost-check look
+    like an abstention (all three absent). Cost proportionality has exactly one
+    question and one cut, and this composes that.
+
+    Same fail-open shape as `decide`: a failed or absent D5 is "no opinion", it
+    cannot breach the cut, and the action is `proceed` (memo §4). Disproportionate
+    spend asks for clarification — narrow it or confirm — it does not reject.
+    """
+    d5 = _noul(answers.get(D5))
+    if d5 is None or d5.noul is None:
+        return GateDecision(
+            action=GateAction.proceed,
+            reasons=("D5 gave no usable answer on cost proportionality; the gate abstains.",),
+            abstained=True,
+        )
+    if d5.noul < policy.d5_cut:
+        return GateDecision(
+            action=GateAction.ask_clarifying,
+            reasons=(
+                f"{D5}={d5.noul:.2f} < {policy.d5_cut:.2f}: spend disproportionate to intent.",
+            ),
+        )
+    return GateDecision(
+        action=GateAction.proceed,
+        reasons=(f"{D5}={d5.noul:.2f} >= {policy.d5_cut:.2f}: spend proportionate.",),
+    )
+
+
 def effective_action(
     decision: GateDecision, policy: GatePolicy = DEFAULT_POLICY
 ) -> GateAction:
@@ -356,6 +422,33 @@ async def ask_gate(
     """
     answers = await client.ask(serialise_state(state), questions(state.estimate_usd))
     return answers, decide(answers, policy)
+
+
+async def ask_cost_gate(
+    client: JevClient,
+    state: GateState,
+    estimate_usd: float | None,
+    policy: GatePolicy = DEFAULT_POLICY,
+) -> tuple[dict[str, Answer], GateDecision]:
+    """Run D5 alone once the Validator has priced the request, and compose it.
+
+    The second checkpoint. `estimate_usd` is the Validator's deterministic number,
+    typically read back off the ticket it produced. Returns `({}, decision)` without
+    a call when the estimate is below the materiality floor — there is nothing to
+    ask, and the record still carries an action ("proceed, below the floor") so the
+    log shows the checkpoint ran.
+
+    Fail-open like `ask_gate`: a Jev outage yields a failed D5, which `decide_cost`
+    reads as "no opinion" and passes.
+    """
+    qs = cost_questions(estimate_usd)
+    if not qs:
+        return {}, GateDecision(
+            action=GateAction.proceed,
+            reasons=(f"estimate below materiality floor (${MATERIALITY_FLOOR_USD:.2f}); D5 not asked.",),
+        )
+    answers = await client.ask(serialise_state(state), qs)
+    return answers, decide_cost(answers, policy)
 
 
 def toolset(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from agent.gate import D1, D2, GateAction, GateDecision
-from agent.gatelog import append_records, build_records, gate_log_path
+from agent.gatelog import append_records, build_records, gate_log_path, new_request_id
 from agent.jev import NoulAnswer
 
 
@@ -40,3 +40,11 @@ def test_append_records_writes_jsonl(tmp_path):
 def test_gate_log_path_env(monkeypatch, tmp_path):
     monkeypatch.setenv("GATE_LOG_PATH", str(tmp_path / "x.jsonl"))
     assert gate_log_path() == tmp_path / "x.jsonl"
+
+
+def test_new_request_id_is_unique_and_usable_as_the_record_id():
+    """One id per turn joins the checkpoints; two calls must not collide."""
+    a, b = new_request_id(), new_request_id()
+    assert a != b
+    rows = build_records("s", _answers(), GateDecision(action=GateAction.proceed), request_id=a)
+    assert {r["request_id"] for r in rows} == {a}
