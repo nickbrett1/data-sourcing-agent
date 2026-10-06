@@ -47,13 +47,17 @@ def _answers(d1: float, d2: float, d3: int = D3_EXACT, d5: float = 0.9) -> dict:
     }
 
 
-def test_the_question_set_is_four_and_d4_is_not_asked():
+def test_the_question_set_excludes_d4_and_d5_is_conditional():
+    # D4 is computed, never asked (memo §3.1). Without an estimate, D5 cannot fire.
     qs = questions()
-    assert set(qs) == {D1, D2, D3, D5}
-    assert "d4" not in " ".join(qs)  # D4 is computed, never asked (memo §3.1)
+    assert set(qs) == {D1, D2, D3}
+    assert "d4" not in " ".join(qs)
     assert qs[D1].type == "noul"
     assert qs[D3].type == "score"
     assert qs[D3].criteria == D3_LEVELS
+    # D5 appears only when the estimate clears the materiality floor.
+    assert D5 not in questions(estimate_usd=1.0)
+    assert D5 in questions(estimate_usd=12.74)
 
 
 def test_serialise_state_carries_the_deterministic_estimate():
@@ -139,7 +143,8 @@ def test_ask_gate_runs_one_call_and_returns_answers_and_action():
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
         body = json.loads(request.content)
-        assert set(body["questions"]) == {D1, D2, D3, D5}  # all four, one request
+        # One request. Without an estimate the set is D1/D2/D3 (D5 needs a number).
+        assert set(body["questions"]) == {D1, D2, D3}
         return httpx.Response(
             200,
             json={

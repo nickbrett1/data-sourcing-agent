@@ -96,9 +96,25 @@ class GateAction(StrEnum):
     reject = "reject"
 
 
-def questions() -> dict[str, Question]:
-    """The four questions, built fresh each call so a caller cannot mutate them."""
-    return {
+# D5 fires only when spend is material (gate memo §2). The floor is an OPEN
+# decision (gate memo §6 #1) — a number, or `> k x typical`. This is a placeholder.
+MATERIALITY_FLOOR_USD = 5.0
+
+
+def questions(
+    estimate_usd: float | None = None,
+    *,
+    materiality_floor: float = MATERIALITY_FLOOR_USD,
+) -> dict[str, Question]:
+    """The questions to ask, built fresh so a caller cannot mutate them.
+
+    D1/D2/D3 are always asked — they are answerable before the request is priced.
+    **D5 is asked only when there is an estimate and it clears the materiality
+    floor**, because "is the spend proportionate?" is not a question you can ask
+    without a number (gate memo §2, D5). At the pre-price checkpoint the estimate
+    is absent, so D5 is simply not in the set.
+    """
+    qs: dict[str, Question] = {
         D1: Noul(
             instructions=(
                 "This is a legitimate, well-intentioned request within the agent's "
@@ -118,14 +134,16 @@ def questions() -> dict[str, Question]:
             instructions="How well the request maps to a specific Databento dataset/schema.",
             criteria=D3_LEVELS,
         ),
-        D5: Noul(
+    }
+    if estimate_usd is not None and estimate_usd >= materiality_floor:
+        qs[D5] = Noul(
             instructions=(
                 "The estimated spend is proportionate to the stated intent. A large "
                 "pull requested as a casual look is disproportionate; the same pull "
                 "requested as a full panel for backtesting is proportionate."
             )
-        ),
-    }
+        )
+    return qs
 
 
 # --- the shared state (gate memo §1) -----------------------------------------
@@ -336,7 +354,7 @@ async def ask_gate(
     Both halves are returned because the log needs the *answers* (for
     calibration) and the *action* (for the record) — gate memo §3.
     """
-    answers = await client.ask(serialise_state(state), questions())
+    answers = await client.ask(serialise_state(state), questions(state.estimate_usd))
     return answers, decide(answers, policy)
 
 

@@ -44,9 +44,12 @@ from starlette.routing import Route
 
 from agent.card import AGENT_SKILLS, build_agent_card
 from agent.contract import validate_agent_result
+from agent.gate import ask_gate, record
 from agent.headers import capture_litellm_headers
 from agent.history import TaskHistory, build_task_store
 from agent.intent import NON_REQUEST_REPLY, is_data_request
+from agent.interpret import build_interpreter, to_gate_state
+from agent.jev import JevClient
 from agent.model import build_model
 from agent.register import register_with_litellm
 from agent.roost import RoostBridge
@@ -107,6 +110,14 @@ agent = Agent(
 # ModelRetry with real error text, up to `retries["output"]` times.
 agent.output_validator(validate_agent_result)
 
+# The interpretation step, pulled out of the run so the gate can sit after it
+# (memo `jev-integration-v1` §3.1; decided 2026-10-06). It shares the gateway
+# model and the discovery toolset with the ticket run.
+interpreter = build_interpreter(build_model(), toolsets=AGENT_TOOLSETS)
+# The Jev client, reached through the proxy's native `/typesafe` route. Held here
+# (not in the Validator) — the boundary rule the gate tests enforce.
+jev_client = JevClient.from_env()
+
 
 async def healthz(_: Request) -> JSONResponse:
     """Liveness for the container healthcheck and the Homepage widget."""
@@ -138,11 +149,40 @@ class TicketAgentExecutor(AgentExecutor):
     `HeaderForwardingClient` injects on the agent's own model calls.
     """
 
-    def __init__(self, agent: Agent, roost_bridge: RoostBridge | None = None):
+    def __init__(
+        self,
+        agent: Agent,
+        roost_bridge: RoostBridge | None = None,
+        interpreter: Agent | None = None,
+        jev: JevClient | None = None,
+    ):
         self._agent = agent
         # The fleet hub. A no-op bridge when roost is unconfigured, so this
         # class never has to branch on whether roost is on (fail-open).
         self._roost = roost_bridge or RoostBridge()
+        # The interpretation step and the gate. Both optional: when unset the
+        # turn runs exactly as before, which is how the tests drive this class
+        # without a model or a gateway.
+        self._interpreter = interpreter
+        self._jev = jev
+
+    async def _assess(self, user_input: str) -> None:
+        """Run the front-door gate in observe-only. Never changes the turn.
+
+        Best-effort by design: the gate is advisory and fail-open, so a failure
+        here — the interpreter, Jev, assembly — must not alter the turn's
+        outcome. It logs the *computed* action; nothing routes on it until
+        `GatePolicy.enforce` is true (memo `jev-integration-v1` §3).
+        """
+        if self._interpreter is None or self._jev is None:
+            return
+        try:
+            intent = (await self._interpreter.run(user_input)).output
+            state = to_gate_state(user_input, intent)
+            _answers, decision = await ask_gate(self._jev, state)
+            print(f"[gate] observe-only: {record(decision)}", flush=True)
+        except Exception as exc:  # a gate failure is not a turn failure (fail-open)
+            print(f"[gate] skipped: {exc!r}", flush=True)
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         # The a2a-sdk event pipeline requires the Task to be enqueued before any
@@ -177,6 +217,8 @@ class TicketAgentExecutor(AgentExecutor):
                     updater.new_agent_message([new_text_part(NON_REQUEST_REPLY)])
                 )
                 return
+            # Interpret, then gate — observe-only, so this cannot change the turn.
+            await self._assess(user_input)
             result = await self._agent.run(user_input)
             ticket = result.output
             rendered = render_ticket_yaml(ticket)
@@ -277,7 +319,9 @@ def create_app(
         protocol_version=PROTOCOL_VERSION,
         skills=AGENT_SKILLS,
     )
-    executor = agent_executor or TicketAgentExecutor(agent, bridge)
+    executor = agent_executor or TicketAgentExecutor(
+        agent, bridge, interpreter=interpreter, jev=jev_client
+    )
     request_handler = DefaultRequestHandler(
         agent_executor=executor,
         task_store=store,
