@@ -46,11 +46,15 @@ from agent.card import AGENT_SKILLS, build_agent_card
 from agent.contract import validate_agent_result
 from agent.gate import (
     DEFAULT_POLICY,
+    EnforcementOutcome,
+    GateAction,
     GateState,
     ask_cost_gate,
     ask_gate,
+    enforce,
     record,
     serialise_state,
+    should_retain_state,
 )
 from agent.gatelog import (
     append_records,
@@ -90,6 +94,36 @@ PROTOCOL_VERSION = "1.0"
 # The container's own name on `ai_proxy` is what the proxy's embedded DNS
 # resolves, so that is the default. See the handover memo §4.
 CARD_URL = os.environ.get("A2A_CARD_URL", "http://data-sourcing-agent:8700")
+
+
+# What the door says when it actually stops a request. These are only ever reached
+# when `GatePolicy.enforce` is true — in observe-only nothing routes on the gate, so
+# a turn that would have been stopped runs exactly as before (gate memo §5).
+_ENFORCED_REPLY = {
+    GateAction.reject: (
+        "I can't take this request: it falls outside what this agent may do "
+        "(sourcing historical Databento market data). Nothing was priced or drafted."
+    ),
+    GateAction.ask_clarifying: (
+        "I need one more thing before I can price this — the request leaves an axis "
+        "(dataset, schema, universe, or timeframe) to guess, or asks for a spend out "
+        "of proportion to the ask. Tell me the missing detail (or the budget) and I'll "
+        "produce the ticket."
+    ),
+}
+
+
+def _enforced_reply(outcome: EnforcementOutcome | None) -> str | None:
+    """The message to complete a turn with, or None to carry on.
+
+    None in every observe-only case: `enforce()` already returns `proceed` unless the
+    policy is enforcing, so this is the single point where "the gate decided" becomes
+    "the turn changed". Kept next to the executor so the routing decision and the
+    wording it produces live together.
+    """
+    if outcome is None or outcome.action is GateAction.proceed:
+        return None
+    return _ENFORCED_REPLY.get(outcome.action)
 
 
 def _load_instructions() -> str:
@@ -184,8 +218,10 @@ class TicketAgentExecutor(AgentExecutor):
         self._interpreter = interpreter
         self._jev = jev
 
-    async def _assess(self, user_input: str, request_id: str) -> ParsedIntent | None:
-        """Interpret, then gate — observe-only. Returns the reading for the ticket step.
+    async def _assess(
+        self, user_input: str, request_id: str
+    ) -> tuple[ParsedIntent | None, EnforcementOutcome | None]:
+        """Interpret, then gate — observe-only. Returns the reading and the outcome.
 
         Best-effort by design: the gate is advisory and fail-open, so a failure
         here — the interpreter, Jev, assembly — must not alter the turn's
@@ -193,26 +229,31 @@ class TicketAgentExecutor(AgentExecutor):
         `GatePolicy.enforce` is true (memo `jev-integration-v1` §3).
 
         The returned `ParsedIntent` is what lets the ticket step stop re-reading
-        the prose: the reading is done once, here, and handed on.
+        the prose: the reading is done once, here, and handed on. The
+        `EnforcementOutcome` is what the caller routes on — `proceed` for as long
+        as the policy is observe-only.
         """
         if self._interpreter is None:
-            return None
+            return None, None
         try:
             intent = (await self._interpreter.run(user_input)).output
         except Exception as exc:  # a bad reading is not a failed turn
             print(f"[interpret] skipped: {exc!r}", flush=True)
-            return None
-        if self._jev is not None:
-            try:
-                state = to_gate_state(user_input, intent)
-                answers, decision = await ask_gate(self._jev, state)
-                # Retain the observe-only traffic — this IS the gate's value until
-                # it enforces anything (gate memo §3/§5).
-                self._log_gate(state, answers, decision, request_id)
-                print(f"[gate] observe-only: {record(decision)}", flush=True)
-            except Exception as exc:  # the gate must never break the turn
-                print(f"[gate] skipped: {exc!r}", flush=True)
-        return intent
+            return None, None
+        if self._jev is None:
+            return intent, None
+        try:
+            state = to_gate_state(user_input, intent)
+            answers, decision = await ask_gate(self._jev, state)
+            outcome = enforce(decision, request_id, DEFAULT_POLICY)
+            # Retain the observe-only traffic — this IS the gate's value until
+            # it enforces anything (gate memo §3/§5).
+            self._log_gate(state, answers, decision, request_id, outcome)
+            print(f"[gate] observe-only: {record(decision)} -> {outcome.reason}", flush=True)
+            return intent, outcome
+        except Exception as exc:  # the gate must never break the turn
+            print(f"[gate] skipped: {exc!r}", flush=True)
+            return intent, None
 
     async def _assess_cost(
         self,
@@ -220,7 +261,7 @@ class TicketAgentExecutor(AgentExecutor):
         intent: ParsedIntent | None,
         ticket: object | None,
         request_id: str,
-    ) -> None:
+    ) -> EnforcementOutcome | None:
         """The post-price checkpoint: fire D5 once the Validator has priced the request.
 
         The front door runs before pricing, so D5 ("is this spend proportionate?")
@@ -234,7 +275,7 @@ class TicketAgentExecutor(AgentExecutor):
         change the turn's outcome.
         """
         if self._jev is None:
-            return
+            return None
         try:
             estimate = getattr(getattr(ticket, "cost", None), "estimate_usd", None)
             if intent is not None:
@@ -246,13 +287,32 @@ class TicketAgentExecutor(AgentExecutor):
                     raw_request=user_input, parsed_intent="(not parsed)", estimate_usd=estimate
                 )
             answers, decision = await ask_cost_gate(self._jev, state, estimate)
-            self._log_gate(state, answers, decision, request_id)
-            print(f"[gate:cost] observe-only: {record(decision)}", flush=True)
+            outcome = enforce(decision, request_id, DEFAULT_POLICY)
+            self._log_gate(state, answers, decision, request_id, outcome)
+            print(f"[gate:cost] observe-only: {record(decision)} -> {outcome.reason}", flush=True)
+            return outcome
         except Exception as exc:  # the cost checkpoint must never break the turn
             print(f"[gate:cost] skipped: {exc!r}", flush=True)
+            return None
 
-    def _log_gate(self, state, answers, decision, request_id: str) -> None:
-        """Retain one checkpoint's traffic — the gate's value until it enforces (§3/§5)."""
+    def _log_gate(
+        self,
+        state,
+        answers,
+        decision,
+        request_id: str,
+        outcome: EnforcementOutcome | None = None,
+    ) -> None:
+        """Retain one checkpoint's traffic — the gate's value until it enforces (§3/§5).
+
+        The *effective* action is recorded alongside the computed one, and the
+        holdback flag with it, so the log distinguishes "the door stopped this"
+        from "the door would have stopped this and the holdback admitted it" — the
+        distinction the enforcement-bias analysis rests on (§6.6). The raw `state`
+        is retained for anything the door would stop, so the rejected region can be
+        audited later.
+        """
+        retain = should_retain_state(decision)
         append_records(
             build_records(
                 serialise_state(state),
@@ -262,6 +322,9 @@ class TicketAgentExecutor(AgentExecutor):
                     DEFAULT_POLICY.d1_cut, DEFAULT_POLICY.d2_cut, DEFAULT_POLICY.d5_cut
                 ),
                 request_id=request_id,
+                action_taken=outcome.action.value if outcome is not None else None,
+                holdback=bool(outcome and outcome.holdback),
+                retain_state=retain,
             )
         )
 
@@ -302,14 +365,24 @@ class TicketAgentExecutor(AgentExecutor):
             # The reading seeds the ticket step so it does not re-derive the axes.
             # One request id spans both gate checkpoints (front door, then post-price).
             request_id = new_request_id()
-            intent = await self._assess(user_input, request_id)
+            intent, outcome = await self._assess(user_input, request_id)
+            # Only ever non-None when the policy is enforcing (GatePolicy.enforce);
+            # in observe-only the effective action is always `proceed` (gate memo §5).
+            stopped = _enforced_reply(outcome)
+            if stopped is not None:
+                await updater.complete(updater.new_agent_message([new_text_part(stopped)]))
+                return
             prompt = ticket_prompt(user_input, intent) if intent is not None else user_input
             result = await self._agent.run(prompt)
             ticket = result.output
             # The post-price checkpoint: D5 could not be asked at the front door
             # (no estimate yet). Now that the Validator has priced the request, it
             # can be — observe-only, same request id.
-            await self._assess_cost(user_input, intent, ticket, request_id)
+            cost_outcome = await self._assess_cost(user_input, intent, ticket, request_id)
+            stopped = _enforced_reply(cost_outcome)
+            if stopped is not None:
+                await updater.complete(updater.new_agent_message([new_text_part(stopped)]))
+                return
             rendered = render_ticket_yaml(ticket)
         except Exception as exc:  # a failed turn is a failed task, not a crash
             await updater.failed(

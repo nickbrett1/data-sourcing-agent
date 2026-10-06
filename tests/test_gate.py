@@ -33,9 +33,13 @@ from agent.gate import (
     decide,
     decide_cost,
     effective_action,
+    enforce,
     escalation_cutoff,
+    holdback_draw,
+    is_holdback,
     questions,
     serialise_state,
+    should_retain_state,
     toolset,
 )
 from agent.jev import JevClient, NoulAnswer, ScoreAnswer
@@ -277,3 +281,73 @@ def test_validator_imports_no_model():
     forbidden = ("jev", "typesafe", "pydantic_ai", "agent.gate", "agent.model")
     offenders = [line for line in imports if any(f in line for f in forbidden)]
     assert not offenders, f"validator.py must hold no model, but imports: {offenders}"
+
+
+# --- enforcement: holdback + retention (§6.6) --------------------------------
+
+
+def test_holdback_draw_is_deterministic_and_in_range():
+    a = holdback_draw("req-1")
+    assert a == holdback_draw("req-1")  # reproducible across calls
+    assert 0.0 <= a < 1.0
+    assert a != holdback_draw("req-2")
+    # A seed re-draws the slice without changing request ids.
+    assert holdback_draw("req-1", seed="period-2") != a
+
+
+def test_is_holdback_edges_and_rate():
+    assert is_holdback("r", 0.0) is False
+    assert is_holdback("r", 1.0) is True
+    ids = [f"r{i}" for i in range(2000)]
+    admitted = sum(is_holdback(i, 0.05) for i in ids)
+    assert 0.03 < admitted / len(ids) < 0.07  # roughly the rate
+
+
+def test_enforce_observe_only_returns_proceed_and_keeps_the_computed_action():
+    decision = decide({D1: NoulAnswer(noul=0.01)})  # computed: reject
+    outcome = enforce(decision, "req-1", DEFAULT_POLICY)
+    assert outcome.action is GateAction.proceed
+    assert outcome.computed is GateAction.reject
+    assert outcome.holdback is False
+    assert outcome.enforce_differed is True
+
+
+def test_enforce_routes_the_computed_action_when_enforcing():
+    policy = GatePolicy(enforce=True, holdback_rate=0.0)
+    decision = decide({D3: ScoreAnswer(score=float(D3_CLOSE - 1))})  # ask_clarifying
+    outcome = enforce(decision, "req-1", policy)
+    assert outcome.action is GateAction.ask_clarifying
+    assert outcome.holdback is False
+
+
+def test_enforce_admits_a_would_be_stop_via_the_holdback_slice():
+    # rate 1.0 admits everything that would otherwise be stopped.
+    policy = GatePolicy(enforce=True, holdback_rate=1.0)
+    decision = decide({D1: NoulAnswer(noul=0.01)})  # reject
+    outcome = enforce(decision, "req-1", policy)
+    assert outcome.action is GateAction.proceed
+    assert outcome.holdback is True
+    assert outcome.computed is GateAction.reject
+
+
+def test_enforce_never_holds_back_a_proceed():
+    policy = GatePolicy(enforce=True, holdback_rate=1.0)
+    decision = decide(_answers(0.99, 0.99))
+    outcome = enforce(decision, "req-1", policy)
+    assert outcome.action is GateAction.proceed
+    assert outcome.holdback is False
+
+
+def test_enforce_without_a_request_id_disables_holdback():
+    """An un-attributable draw is not a draw: no id, no admission."""
+    policy = GatePolicy(enforce=True, holdback_rate=1.0)
+    decision = decide({D1: NoulAnswer(noul=0.01)})
+    outcome = enforce(decision, None, policy)
+    assert outcome.action is GateAction.reject
+    assert outcome.holdback is False
+
+
+def test_should_retain_state_for_anything_the_door_would_stop():
+    assert should_retain_state(decide({D1: NoulAnswer(noul=0.01)})) is True
+    assert should_retain_state(decide({D3: ScoreAnswer(score=0.0)})) is True
+    assert should_retain_state(decide(_answers(0.99, 0.99))) is False

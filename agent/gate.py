@@ -42,10 +42,21 @@ caller that has not opted into enforcement ignores it — the whole point of the
 shadow phase (gate memo §5). Enforcement also biases the calibration set (§6.6),
 which is why switching it on is a deliberate act with a holdback slice, not a
 config default.
+
+**Enforcement is built, and one flag away.** `enforce()` is the single place that
+turns a computed decision into what happens, and the machinery the switch needs is
+already here: the **holdback slice** (`is_holdback`, a deterministic draw on the
+request id) admits a fraction of would-be-stops so the rejected region stays
+observable, and `should_retain_state` keeps the raw `state` for anything the door
+would stop. Flipping `GatePolicy(enforce=True)` is the entire act of enabling it;
+`holdback_rate` and its seed, and the retention policy, are already wired. See
+§6.6 of the data-acquisition memo for *why* both must be in place at the moment of
+enforcement rather than added after.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import statistics
 from collections.abc import Callable, Sequence
@@ -91,6 +102,8 @@ D3_CLOSE = D3_LEVELS.index("close")
 D2_CUT_PLACEHOLDER = 0.91
 D1_CUT_PLACEHOLDER = 0.5
 D5_CUT_PLACEHOLDER = 0.5
+# The holdback fraction (§6.6): ~1–5%. Exact value open (§8 #8); inert until enforced.
+HOLDBACK_RATE_PLACEHOLDER = 0.02
 
 
 class GateAction(StrEnum):
@@ -244,6 +257,12 @@ class GatePolicy:
     d2_cut: float = D2_CUT_PLACEHOLDER
     d5_cut: float = D5_CUT_PLACEHOLDER
     d3_min: int = D3_CLOSE
+    # The holdback slice (§6.6): the fraction of would-be-stops admitted anyway, so
+    # the rejected region stays observable once enforcement begins. Inert while
+    # `enforce` is False; the fraction itself is open (§8 #8). `holdback_seed` lets
+    # the slice be re-drawn for a new calibration period without changing request ids.
+    holdback_rate: float = HOLDBACK_RATE_PLACEHOLDER
+    holdback_seed: str = ""
 
 
 # A module-level singleton so the default is not a call in a signature (B008),
@@ -346,18 +365,121 @@ def decide_cost(
 
 
 def effective_action(
-    decision: GateDecision, policy: GatePolicy = DEFAULT_POLICY
+    decision: GateDecision,
+    policy: GatePolicy = DEFAULT_POLICY,
+    *,
+    request_id: str | None = None,
 ) -> GateAction:
-    """What a caller should actually *do*: the computed action only when enforcing.
+    """What a caller should actually *do* — the enforcement decision's action.
 
-    This is where observe-only lives. The gate always *computes* an action and the
-    log always records it, but until `policy.enforce` is true the effective action
-    is `proceed` — nothing is routed on. Keeping that a function (rather than an
-    `if` scattered at call sites) means "are we enforcing?" has exactly one
-    home, and the distinction between *computed* and *enforced* is impossible to
-    lose track of.
+    Kept as the narrow façade over `enforce()` so the common call site ("what do I
+    do?") does not have to know about holdback. `request_id` is optional because a
+    caller that only wants the observe-only answer does not need one; when
+    enforcement is on and a request id is supplied, the holdback slice can admit a
+    would-be-stop as `proceed`.
     """
-    return decision.action if policy.enforce else GateAction.proceed
+    return enforce(decision, request_id, policy).action
+
+
+# --- enforcement: the holdback slice (§6.6, §8 #8) --------------------------
+#
+# Enforcement biases the calibration set: the moment the door stops a request, that
+# request stops producing a `downstream_outcome`, so recalibration then runs on the
+# set that *survived* the door and a false reject — whose counterfactual was deleted
+# at the door — becomes unmeasurable (data-acquisition memo §6.6, the "one defect
+# enforcement introduces"). Two mitigations, both to be in place *at* the moment of
+# enforcement rather than added after:
+#
+#   1. hold back a random slice that passes the door regardless of score, and
+#   2. retain the raw `state` (not just its hash) for anything the door would stop.
+#
+# The holdback draw is a *function of the request id*, not a coin flip at call time,
+# because the same turn may evaluate its action more than once (the post-price
+# checkpoint re-reads it) and the two evaluations must agree. Determinism by
+# construction, so replaying a request id gives the same admission decision.
+
+def holdback_draw(request_id: str, *, seed: str = "") -> float:
+    """A deterministic uniform draw in `[0, 1)` for a request id.
+
+    SHA-256 of `seed:request_id`, first eight bytes as a fraction. Stable across
+    processes and restarts — no RNG state to persist — which is what lets the
+    holdback be reproduced for a later audit rather than trusted.
+    """
+    digest = hashlib.sha256(f"{seed}:{request_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") / 2**64
+
+
+def is_holdback(request_id: str, rate: float, *, seed: str = "") -> bool:
+    """Is this request in the holdback slice? A rate of 0 never admits; 1 always."""
+    if rate <= 0.0:
+        return False
+    if rate >= 1.0:
+        return True
+    return holdback_draw(request_id, seed=seed) < rate
+
+
+@dataclass(frozen=True)
+class EnforcementOutcome:
+    """What the door did, and why — the record for the enforcement-bias analysis."""
+
+    action: GateAction
+    computed: GateAction
+    holdback: bool = False
+    reason: str = ""
+
+    @property
+    def enforce_differed(self) -> bool:
+        """True when the door did something other than the computed action."""
+        return self.action is not self.computed
+
+
+def enforce(
+    decision: GateDecision,
+    request_id: str | None = None,
+    policy: GatePolicy = DEFAULT_POLICY,
+) -> EnforcementOutcome:
+    """Turn a computed decision into what actually happens — the one place that knows.
+
+    Three cases, in order:
+
+    * **Observe-only** (`policy.enforce` False) — the action is `proceed` regardless;
+      the computed verdict survives in `computed` for the log (gate memo §5).
+    * **Holdback** — when enforcing and the computed action would stop the request,
+      the holdback slice admits it as `proceed`. This is the sampled rejected region
+      (§6.6): the only way a false reject is ever measured.
+    * **Enforced** — otherwise the computed action stands.
+
+    `request_id` being `None` while enforcing disables holdback for that call rather
+    than guessing an id — an un-attributable draw is not a draw.
+    """
+    if not policy.enforce:
+        return EnforcementOutcome(
+            GateAction.proceed, decision.action, reason="observe-only; nothing routed on."
+        )
+    if decision.action is GateAction.proceed:
+        return EnforcementOutcome(GateAction.proceed, decision.action, reason="computed action is proceed.")
+    if request_id is not None and is_holdback(
+        request_id, policy.holdback_rate, seed=policy.holdback_seed
+    ):
+        return EnforcementOutcome(
+            GateAction.proceed,
+            decision.action,
+            holdback=True,
+            reason="holdback slice: admitted regardless of score, to keep the rejected region observable.",
+        )
+    return EnforcementOutcome(decision.action, decision.action, reason="enforced.")
+
+
+def should_retain_state(decision: GateDecision) -> bool:
+    """Should the raw `state` be kept, not just its hash?
+
+    Yes for anything the door would stop (`reject`/`ask_clarifying`). A hash cannot
+    be audited after the fact; a stored state lets the rejected region be hand-read
+    later without re-running the gate against live credit (data-acquisition §6.6).
+    Kept true even in observe-only, because that is exactly when the would-be-stops
+    accumulate the corpus enforcement will be judged on.
+    """
+    return decision.action is not GateAction.proceed
 
 
 # --- the day-one lever: a rate, not a probability (§8 #3a) -------------------

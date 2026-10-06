@@ -11,6 +11,13 @@ A record carries the gate memo §3 fields: `request_id`, `question_id`, `primiti
 and filled by a later pass — it is the delayed label, and a record without it is
 still a record (we can find it again by `request_id`).
 
+Three fields were added for enforcement (§6.6): `action_computed` (the verdict,
+before policy), `holdback` (was this a would-be stop the holdback admitted?), and
+`state` (the raw state, retained only for would-be stops, so the rejected region
+can be audited once the door starts stopping things). `action_taken` is the
+*effective* action — `proceed` in observe-only — so it never overstates what the
+door did.
+
 Storage is **JSONL appended to one file** under `AGENT_STATE_DIR`: append-only,
 one line per record, so a crash mid-write loses at most the last line and no
 reader needs a schema migration. Not a database, deliberately — the log is a
@@ -83,15 +90,29 @@ def build_records(
     *,
     thresholds: dict[str, float] | None = None,
     request_id: str | None = None,
+    action_taken: str | None = None,
+    holdback: bool = False,
+    retain_state: bool = False,
 ) -> list[dict]:
     """One record per question, plus the composed action on each.
 
     Every question carries `action_taken`, so the log can be read either per
     question (calibration) or per request (what the door did) without a join.
+
+    `action_taken` is the *effective* action (what the door did); it defaults to the
+    computed one, which is what observe-only means. When enforcement is on, the two
+    differ for a holdback admission — `action_computed` keeps the verdict so the
+    calibrated score distribution is not lost to a "proceed" that was really a stop.
+
+    `retain_state` writes the raw `state` under `state` (alongside the always-present
+    `state_hash`) for anything the door would stop, per §6.6: a hash cannot be
+    audited, and the rejected region is the one that disappears when enforcement
+    begins.
     """
     rid = request_id or uuid.uuid4().hex
     thresholds = thresholds or {}
     digest = _state_hash(state_text)
+    taken = action_taken or decision.action.value
     records: list[dict] = []
     for qid, answer in answers.items():
         value, probability, confidence = _answer_fields(answer)
@@ -106,10 +127,17 @@ def build_records(
                 "confidence": confidence,
                 "failed": answer.failed,
                 "threshold_at_time": thresholds.get(qid),
-                "action_taken": decision.action.value,
+                "action_taken": taken,
+                "action_computed": decision.action.value,
+                "holdback": holdback,
                 "downstream_outcome": None,
             }
         )
+    if retain_state:
+        # The raw state rides on the first record only: it is per-request, not
+        # per-question, and repeating it per row would balloon the log.
+        for record in records:
+            record["state"] = state_text if record is records[0] else None
     return records
 
 

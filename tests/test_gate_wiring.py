@@ -17,7 +17,7 @@ import asyncio
 import json
 
 from agent import main
-from agent.gate import D1, D2, D3, D5
+from agent.gate import D1, D2, D3, D5, GateAction, GatePolicy
 from agent.interpret import ParsedIntent
 from agent.jev import NoulAnswer, ScoreAnswer
 from agent.ticket import (
@@ -93,7 +93,7 @@ def test_the_second_checkpoint_asks_only_d5_when_the_estimate_is_material(tmp_pa
     ex = _executor(_Interpreter(), jev)
     rid = "rid-join"
 
-    intent = asyncio.run(ex._assess("daily SPY option bars for January", rid))
+    intent, _ = asyncio.run(ex._assess("daily SPY option bars for January", rid))
     asyncio.run(ex._assess_cost("daily SPY option bars for January", intent, _ticket(50.0), rid))
 
     # Front door asked D1/D2/D3; the cost checkpoint asked D5 and nothing else.
@@ -106,9 +106,11 @@ def test_the_second_checkpoint_asks_only_d5_when_the_estimate_is_material(tmp_pa
     assert {r["request_id"] for r in rows} == {rid}
     by_q = {r["question_id"]: r for r in rows}
     assert set(by_q) == {D1, D2, D3, D5}
-    # D5 was disproportionate (0.20 < 0.5) but we are observe-only: the *recorded*
-    # action for the cost checkpoint is ask_clarifying, and nothing routed on it.
-    assert by_q[D5]["action_taken"] == "ask_clarifying"
+    # D5 was disproportionate (0.20 < 0.5) but we are observe-only: the *computed*
+    # action is ask_clarifying, the *taken* action is proceed, and nothing routed.
+    assert by_q[D5]["action_computed"] == "ask_clarifying"
+    assert by_q[D5]["action_taken"] == "proceed"
+    assert by_q[D5]["holdback"] is False
     assert by_q[D5]["probability"] == 0.20
     assert by_q[D5]["threshold_at_time"] == 0.5
 
@@ -119,7 +121,7 @@ def test_the_second_checkpoint_is_skipped_below_the_materiality_floor(tmp_path, 
     ex = _executor(_Interpreter(), jev)
     rid = "rid-cheap"
 
-    intent = asyncio.run(ex._assess("a tiny pull", rid))
+    intent, _ = asyncio.run(ex._assess("a tiny pull", rid))
     asyncio.run(ex._assess_cost("a tiny pull", intent, _ticket(0.01), rid))
 
     # Only the front-door call happened; no D5 call for an immaterial estimate.
@@ -150,7 +152,7 @@ def test_the_gate_path_never_changes_the_rendered_ticket(tmp_path, monkeypatch):
 
     ex = _executor(_Interpreter(), _Jev())
     rid = "rid-inert"
-    intent = asyncio.run(ex._assess("daily SPY option bars", rid))
+    intent, _ = asyncio.run(ex._assess("daily SPY option bars", rid))
     asyncio.run(ex._assess_cost("daily SPY option bars", intent, ticket, rid))
 
     assert render_ticket_yaml(ticket) == before
@@ -165,7 +167,7 @@ def test_a_jev_failure_at_the_cost_checkpoint_never_raises(tmp_path, monkeypatch
 
     ex = _executor(_Interpreter(), _Boom())
     rid = "rid-boom"
-    intent = asyncio.run(ex._assess("daily SPY option bars", rid))
+    intent, _ = asyncio.run(ex._assess("daily SPY option bars", rid))
     # Must not raise: the checkpoint is best-effort.
     asyncio.run(ex._assess_cost("daily SPY option bars", intent, _ticket(50.0), rid))
 
@@ -174,3 +176,64 @@ def test_cost_proposals_still_render_a_ticket():
     """Guard the fixture itself: a Ticket is a Ticket."""
     assert "estimate_usd" in render_ticket_yaml(_ticket(1.0))
     assert CostProposal(max_usd=1.0).max_usd == 1.0
+
+
+class _RejectingJev(_Jev):
+    """Jev that would stop the request at the door (D1 = no)."""
+
+    async def ask(self, _state: str, questions: dict):
+        self.question_sets.append(set(questions))
+        return {qid: NoulAnswer(noul=0.01) for qid in questions}
+
+
+def test_would_be_stops_retain_their_raw_state(tmp_path, monkeypatch):
+    """§6.6: a hash cannot be audited, so keep the raw state for the rejected region."""
+    monkeypatch.setenv("GATE_LOG_PATH", str(tmp_path / "gate-log.jsonl"))
+    ex = _executor(_Interpreter(), _RejectingJev())
+    rid = "rid-stop"
+
+    asyncio.run(ex._assess("do something out of remit", rid))
+
+    rows = [json.loads(line) for line in (tmp_path / "gate-log.jsonl").read_text().splitlines()]
+    assert rows and all(r["action_computed"] == "reject" for r in rows)
+    assert all(r["action_taken"] == "proceed" for r in rows)  # observe-only
+    # The raw state rides on the first row only.
+    retained = [r.get("state") for r in rows if r.get("state")]
+    assert len(retained) == 1 and "out of remit" in retained[0]
+
+
+def test_nothing_is_retained_for_a_request_that_would_proceed(tmp_path, monkeypatch):
+    monkeypatch.setenv("GATE_LOG_PATH", str(tmp_path / "gate-log.jsonl"))
+    ex = _executor(_Interpreter(), _Jev())
+    asyncio.run(ex._assess("daily SPY option bars", "rid-clean"))
+
+    rows = [json.loads(line) for line in (tmp_path / "gate-log.jsonl").read_text().splitlines()]
+    assert all(r.get("state") is None for r in rows)
+
+
+def test_flipping_enforce_is_the_only_thing_that_changes_a_turn(tmp_path, monkeypatch):
+    """The holdback admits a would-be stop; without it, the door stops the turn."""
+    monkeypatch.setenv("GATE_LOG_PATH", str(tmp_path / "gate-log.jsonl"))
+    ex = _executor(_Interpreter(), _RejectingJev())
+    rid = "rid-flip"
+
+    # Observe-only: the outcome action is proceed, so the turn is unchanged.
+    _, outcome = asyncio.run(ex._assess("out of remit", rid))
+    assert main._enforced_reply(outcome) is None
+
+    # Enforcing with no holdback: the door stops the turn with the reject message.
+    monkeypatch.setattr(main, "DEFAULT_POLICY", GatePolicy(enforce=True, holdback_rate=0.0))
+    _, outcome = asyncio.run(ex._assess("out of remit", rid + "-2"))
+    assert outcome.action is GateAction.reject
+    assert main._enforced_reply(outcome).startswith("I can't take this request")
+
+    # Enforcing *with* the holdback admitting everything: the turn proceeds anyway.
+    monkeypatch.setattr(main, "DEFAULT_POLICY", GatePolicy(enforce=True, holdback_rate=1.0))
+    _, outcome = asyncio.run(ex._assess("out of remit", rid + "-3"))
+    assert outcome.action is GateAction.proceed
+    assert outcome.holdback is True
+    assert main._enforced_reply(outcome) is None
+
+    rows = [json.loads(line) for line in (tmp_path / "gate-log.jsonl").read_text().splitlines()]
+    holdback_rows = [r for r in rows if r["holdback"]]
+    assert holdback_rows and all(r["action_computed"] == "reject" for r in holdback_rows)
