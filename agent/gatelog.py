@@ -31,6 +31,7 @@ import json
 import os
 import uuid
 from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 from agent.gate import D1, D2, D3, D5, GateDecision
@@ -113,6 +114,7 @@ def build_records(
     thresholds = thresholds or {}
     digest = _state_hash(state_text)
     taken = action_taken or decision.action.value
+    ts = datetime.now(UTC).isoformat()
     records: list[dict] = []
     for qid, answer in answers.items():
         value, probability, confidence = _answer_fields(answer)
@@ -131,6 +133,7 @@ def build_records(
                 "action_computed": decision.action.value,
                 "holdback": holdback,
                 "downstream_outcome": None,
+                "ts": ts,
             }
         )
     if retain_state:
