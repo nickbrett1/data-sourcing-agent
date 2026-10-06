@@ -48,7 +48,12 @@ from agent.gate import ask_gate, record
 from agent.headers import capture_litellm_headers
 from agent.history import TaskHistory, build_task_store
 from agent.intent import NON_REQUEST_REPLY, is_data_request
-from agent.interpret import build_interpreter, to_gate_state
+from agent.interpret import (
+    ParsedIntent,
+    build_interpreter,
+    ticket_prompt,
+    to_gate_state,
+)
 from agent.jev import JevClient
 from agent.model import build_model
 from agent.register import register_with_litellm
@@ -166,23 +171,32 @@ class TicketAgentExecutor(AgentExecutor):
         self._interpreter = interpreter
         self._jev = jev
 
-    async def _assess(self, user_input: str) -> None:
-        """Run the front-door gate in observe-only. Never changes the turn.
+    async def _assess(self, user_input: str) -> ParsedIntent | None:
+        """Interpret, then gate — observe-only. Returns the reading for the ticket step.
 
         Best-effort by design: the gate is advisory and fail-open, so a failure
         here — the interpreter, Jev, assembly — must not alter the turn's
         outcome. It logs the *computed* action; nothing routes on it until
         `GatePolicy.enforce` is true (memo `jev-integration-v1` §3).
+
+        The returned `ParsedIntent` is what lets the ticket step stop re-reading
+        the prose: the reading is done once, here, and handed on.
         """
-        if self._interpreter is None or self._jev is None:
-            return
+        if self._interpreter is None:
+            return None
         try:
             intent = (await self._interpreter.run(user_input)).output
-            state = to_gate_state(user_input, intent)
-            _answers, decision = await ask_gate(self._jev, state)
-            print(f"[gate] observe-only: {record(decision)}", flush=True)
-        except Exception as exc:  # a gate failure is not a turn failure (fail-open)
-            print(f"[gate] skipped: {exc!r}", flush=True)
+        except Exception as exc:  # a bad reading is not a failed turn
+            print(f"[interpret] skipped: {exc!r}", flush=True)
+            return None
+        if self._jev is not None:
+            try:
+                state = to_gate_state(user_input, intent)
+                _answers, decision = await ask_gate(self._jev, state)
+                print(f"[gate] observe-only: {record(decision)}", flush=True)
+            except Exception as exc:  # the gate must never break the turn
+                print(f"[gate] skipped: {exc!r}", flush=True)
+        return intent
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         # The a2a-sdk event pipeline requires the Task to be enqueued before any
@@ -218,8 +232,10 @@ class TicketAgentExecutor(AgentExecutor):
                 )
                 return
             # Interpret, then gate — observe-only, so this cannot change the turn.
-            await self._assess(user_input)
-            result = await self._agent.run(user_input)
+            # The reading seeds the ticket step so it does not re-derive the axes.
+            intent = await self._assess(user_input)
+            prompt = ticket_prompt(user_input, intent) if intent is not None else user_input
+            result = await self._agent.run(prompt)
             ticket = result.output
             rendered = render_ticket_yaml(ticket)
         except Exception as exc:  # a failed turn is a failed task, not a crash

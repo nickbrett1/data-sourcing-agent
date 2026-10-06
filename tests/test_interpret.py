@@ -7,7 +7,7 @@ on. A silent fill-in is the failure the gate exists to catch.
 
 from __future__ import annotations
 
-from agent.interpret import AXES, ParsedIntent, to_gate_state
+from agent.interpret import AXES, ParsedIntent, ticket_prompt, to_gate_state
 
 
 def test_axes_vocabulary_matches_d2():
@@ -44,6 +44,18 @@ def test_to_gate_state_carries_the_discovery_mappings():
     assert state.raw_request == "get SPY options"
     assert state.candidate_mappings == ("OPRA.PILLAR ohlcv-1d", "OPRA.PILLAR trades")
     assert state.estimate_usd is None  # pre-price: D5 cannot fire
+
+
+def test_ticket_prompt_hands_over_the_reading_so_it_is_not_rederived():
+    intent = ParsedIntent(
+        understood="the SPY options chain",
+        schema_name="ohlcv-1d",
+        unclear_axes=["timeframe"],
+    )
+    prompt = ticket_prompt("get the whole SPY chain", intent)
+    assert "get the whole SPY chain" in prompt
+    assert "timeframe=UNKNOWN" in prompt
+    assert "rather than deriving" in prompt
 
 
 def test_to_gate_state_passes_an_estimate_when_pricing_has_happened():

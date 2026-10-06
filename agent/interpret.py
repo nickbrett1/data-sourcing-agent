@@ -123,6 +123,26 @@ def to_gate_state(
     )
 
 
+def ticket_prompt(message: str, intent: ParsedIntent) -> str:
+    """Compose the ticket step's input from the reading the interpreter already did.
+
+    The ticket step is a *separate* model call from interpretation (the gate sits
+    between them), but it must not **re-read** the prose — that would be a second,
+    possibly different, interpretation. So it is handed the message *and* the
+    reading, and told to use the reading. The two calls then have one shared view
+    of the request instead of two independent ones.
+    """
+    return (
+        "The user asked:\n"
+        f"{message.strip()}\n\n"
+        "A prior step read that request and reported:\n"
+        f"{intent.render()}\n\n"
+        "Produce the download ticket. Use the reading above rather than deriving "
+        "the axes again. Where an axis is UNKNOWN you must still produce a "
+        "complete ticket; the Validator will reject what is illegal."
+    )
+
+
 INTERPRETER_INSTRUCTIONS = """\
 You read one message from a user who wants historical market data, and you report
 what it asks for — honestly, including what it does not say.
