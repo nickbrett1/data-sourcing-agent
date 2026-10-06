@@ -56,6 +56,7 @@ from agent.gate import (
     serialise_state,
     should_retain_state,
 )
+from agent.gatelabels import Outcome, append_label
 from agent.gatelog import (
     append_records,
     build_records,
@@ -295,6 +296,20 @@ class TicketAgentExecutor(AgentExecutor):
             print(f"[gate:cost] skipped: {exc!r}", flush=True)
             return None
 
+    def _label(self, request_id: str | None, outcome: Outcome, *, note: str | None = None) -> None:
+        """Append the delayed label for this turn — best-effort, like the gate itself.
+
+        The agent can only honestly label the two outcomes it observes: a ticket was
+        drafted, or the turn failed. `approved`/`rejected`/`reran` come later from
+        outside. None of it may break a turn (§4's fail-open, applied to logging).
+        """
+        if request_id is None:
+            return
+        try:
+            append_label(request_id, outcome, source="agent", note=note)
+        except Exception as exc:  # a label that cannot be written must not fail a turn
+            print(f"[label] skipped: {exc!r}", flush=True)
+
     def _log_gate(
         self,
         state,
@@ -347,6 +362,8 @@ class TicketAgentExecutor(AgentExecutor):
         # `status.get` poll time out (which is what would drop the tunnel).
         self._roost.turn_started()
         await self._roost.emit("turn_started", taskId=context.task_id)
+        user_input = ""
+        request_id: str | None = None
         try:
             user_input = context.get_user_input()
             # A turn that is not a data request (a greeting, thanks, small talk)
@@ -370,6 +387,7 @@ class TicketAgentExecutor(AgentExecutor):
             # in observe-only the effective action is always `proceed` (gate memo §5).
             stopped = _enforced_reply(outcome)
             if stopped is not None:
+                self._label(request_id, Outcome.door_stopped)
                 await updater.complete(updater.new_agent_message([new_text_part(stopped)]))
                 return
             prompt = ticket_prompt(user_input, intent) if intent is not None else user_input
@@ -381,10 +399,12 @@ class TicketAgentExecutor(AgentExecutor):
             cost_outcome = await self._assess_cost(user_input, intent, ticket, request_id)
             stopped = _enforced_reply(cost_outcome)
             if stopped is not None:
+                self._label(request_id, Outcome.door_stopped)
                 await updater.complete(updater.new_agent_message([new_text_part(stopped)]))
                 return
             rendered = render_ticket_yaml(ticket)
         except Exception as exc:  # a failed turn is a failed task, not a crash
+            self._label(request_id, Outcome.run_failed, note=str(exc)[:200])
             await updater.failed(
                 updater.new_agent_message([new_text_part(f"The run failed: {exc}")])
             )
@@ -393,6 +413,9 @@ class TicketAgentExecutor(AgentExecutor):
             self._roost.turn_finished()
             await self._roost.emit("finished", taskId=context.task_id)
         await updater.add_artifact([new_text_part(rendered)], name="ticket")
+        # The only label the agent can write with certainty: a ticket exists. Whether
+        # it was any good is a human's call, logged later from outside (§6.5.1).
+        self._label(request_id, Outcome.drafted)
         await updater.complete()
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:

@@ -50,6 +50,7 @@ from agent.gate import (
     GatePolicy,
     escalation_cutoff,
 )
+from agent.gatelabels import apply_labels, load_labels
 from agent.gatelog import gate_log_path
 
 # The rates the report prices the day-one lever at: "if we can review the top N%".
@@ -148,6 +149,7 @@ class GateReport:
     holdbacks: int
     labelled: int
     policy: GatePolicy
+    outcomes: Counter = field(default_factory=Counter)
 
     @property
     def would_stop(self) -> int:
@@ -169,6 +171,7 @@ def summarise(records: list[dict], policy: GatePolicy = DEFAULT_POLICY) -> GateR
     seen: set = set()
     actions: Counter = Counter()
     holdbacks = 0
+    outcomes: Counter = Counter()
     for record in records:
         rid = record.get("request_id")
         if rid in seen:
@@ -177,6 +180,8 @@ def summarise(records: list[dict], policy: GatePolicy = DEFAULT_POLICY) -> GateR
         actions[record.get("action_computed", "proceed")] += 1
         if record.get("holdback"):
             holdbacks += 1
+        if record.get("downstream_outcome"):
+            outcomes[record["downstream_outcome"]] += 1
     timestamps = sorted(r["ts"] for r in records if r.get("ts"))
     return GateReport(
         requests=len(requests),
@@ -186,6 +191,7 @@ def summarise(records: list[dict], policy: GatePolicy = DEFAULT_POLICY) -> GateR
         questions=_question_stats(records),
         computed_actions=actions,
         holdbacks=holdbacks,
+        outcomes=outcomes,
         labelled=sum(
             1
             for r in records
@@ -265,6 +271,9 @@ def render(report: GateReport) -> str:
     add("Labels (the delayed `downstream_outcome`)")
     add("-" * 58)
     add(f"  labelled D2/D5 records: {report.labelled} of {report.records}")
+    if report.outcomes:
+        tally = ", ".join(f"{name}={count}" for name, count in report.outcomes.most_common())
+        add(f"  outcomes: {tally}")
     if report.labelled == 0:
         add("  NONE yet — the probability cuts below are provisional, not calibrated.")
         add("  The `escalate the top N%` lever above is the only threshold that is usable now.")
@@ -304,6 +313,8 @@ def main(argv: list[str] | None = None) -> int:
     if not records:
         print("No gate log found (set $GATE_LOG_PATH or pass a path).", file=sys.stderr)
         return 1
+    # Join the delayed labels so the report sees outcomes, not just decisions.
+    apply_labels(records, load_labels())
     print(render(summarise(records, _policy_from_args(args))))
     return 0
 
