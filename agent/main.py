@@ -44,7 +44,8 @@ from starlette.routing import Route
 
 from agent.card import AGENT_SKILLS, build_agent_card
 from agent.contract import validate_agent_result
-from agent.gate import ask_gate, record
+from agent.gate import DEFAULT_POLICY, ask_gate, record, serialise_state
+from agent.gatelog import append_records, build_records, default_thresholds
 from agent.headers import capture_litellm_headers
 from agent.history import TaskHistory, build_task_store
 from agent.intent import NON_REQUEST_REPLY, is_data_request
@@ -192,7 +193,19 @@ class TicketAgentExecutor(AgentExecutor):
         if self._jev is not None:
             try:
                 state = to_gate_state(user_input, intent)
-                _answers, decision = await ask_gate(self._jev, state)
+                answers, decision = await ask_gate(self._jev, state)
+                # Retain the observe-only traffic — this IS the gate's value until
+                # it enforces anything (gate memo §3/§5).
+                append_records(
+                    build_records(
+                        serialise_state(state),
+                        answers,
+                        decision,
+                        thresholds=default_thresholds(
+                            DEFAULT_POLICY.d1_cut, DEFAULT_POLICY.d2_cut, DEFAULT_POLICY.d5_cut
+                        ),
+                    )
+                )
                 print(f"[gate] observe-only: {record(decision)}", flush=True)
             except Exception as exc:  # the gate must never break the turn
                 print(f"[gate] skipped: {exc!r}", flush=True)

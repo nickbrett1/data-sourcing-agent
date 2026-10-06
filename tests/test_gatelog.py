@@ -1,0 +1,42 @@
+"""Tests for the gate's shadow log."""
+
+from __future__ import annotations
+
+import json
+
+from agent.gate import D1, D2, GateAction, GateDecision
+from agent.gatelog import append_records, build_records, gate_log_path
+from agent.jev import NoulAnswer
+
+
+def _answers() -> dict:
+    return {D1: NoulAnswer(noul=0.98), D2: NoulAnswer(noul=0.3)}
+
+
+def test_build_records_makes_one_row_per_question_with_the_action():
+    decision = GateDecision(action=GateAction.ask_clarifying, reasons=("d2 low",))
+    rows = build_records("state text", _answers(), decision, request_id="req1")
+    assert {r["question_id"] for r in rows} == {D1, D2}
+    assert all(r["action_taken"] == "ask_clarifying" for r in rows)
+    assert all(r["request_id"] == "req1" for r in rows)
+    assert all(r["downstream_outcome"] is None for r in rows)  # filled later
+    d2 = next(r for r in rows if r["question_id"] == D2)
+    assert d2["primitive"] == "noul"
+    assert d2["probability"] == 0.3
+    # Same state text -> same hash, so identical requests group.
+    assert d2["state_hash"] == build_records("state text", _answers(), decision)[0]["state_hash"]
+
+
+def test_append_records_writes_jsonl(tmp_path):
+    rows = build_records("s", _answers(), GateDecision(action=GateAction.proceed))
+    path = tmp_path / "gate-log.jsonl"
+    assert append_records(rows, path) == 2
+    append_records(rows, path)  # appends, does not truncate
+    lines = path.read_text().splitlines()
+    assert len(lines) == 4
+    assert json.loads(lines[0])["question_id"] == D1
+
+
+def test_gate_log_path_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("GATE_LOG_PATH", str(tmp_path / "x.jsonl"))
+    assert gate_log_path() == tmp_path / "x.jsonl"
