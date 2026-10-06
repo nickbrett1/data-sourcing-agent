@@ -44,8 +44,11 @@ from starlette.routing import Route
 
 from agent.card import AGENT_SKILLS, build_agent_card
 from agent.contract import validate_agent_result
+from agent.cutoff import resolve_policy
 from agent.gate import (
-    DEFAULT_POLICY,
+    DEFAULT_POLICY as _BASE_POLICY,
+)
+from agent.gate import (
     EnforcementOutcome,
     GateAction,
     GateState,
@@ -95,6 +98,12 @@ PROTOCOL_VERSION = "1.0"
 # The container's own name on `ai_proxy` is what the proxy's embedded DNS
 # resolves, so that is the default. See the handover memo §4.
 CARD_URL = os.environ.get("A2A_CARD_URL", "http://data-sourcing-agent:8700")
+
+# The policy actually in force. `resolve_policy` returns observe-only unless
+# `GATE_ENFORCE` is set, and when it is, refines the D2 cut from the frozen rolling
+# cutoff (`agent.cutoff`) and narrows the enforced set to the ask-path. Resolved
+# once at import so the switch is a deploy-time fact, not a per-request read of a file.
+DEFAULT_POLICY = resolve_policy(_BASE_POLICY)
 
 
 # What the door says when it actually stops a request. These are only ever reached

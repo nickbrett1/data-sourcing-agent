@@ -60,7 +60,7 @@ import hashlib
 import json
 import statistics
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from pydantic import BaseModel
@@ -253,6 +253,14 @@ class GatePolicy:
     """
 
     enforce: bool = False
+    # Which computed actions the door is allowed to route on. Default: all of them,
+    # so a bare `enforce=True` is complete. The cautious start is narrower — the
+    # ask-path only, because a wrong clarify costs one question while a wrong reject
+    # bounces a real request with no human touch. A computed action outside this set
+    # is admitted (proceed) and kept in `computed` for the log, exactly like a holdback.
+    enforce_actions: frozenset[GateAction] = field(
+        default_factory=lambda: frozenset(GateAction)
+    )
     d1_cut: float = D1_CUT_PLACEHOLDER
     d2_cut: float = D2_CUT_PLACEHOLDER
     d5_cut: float = D5_CUT_PLACEHOLDER
@@ -458,6 +466,12 @@ def enforce(
         )
     if decision.action is GateAction.proceed:
         return EnforcementOutcome(GateAction.proceed, decision.action, reason="computed action is proceed.")
+    if decision.action not in policy.enforce_actions:
+        return EnforcementOutcome(
+            GateAction.proceed,
+            decision.action,
+            reason=f"{decision.action.value} is not in the enforced set; observed only.",
+        )
     if request_id is not None and is_holdback(
         request_id, policy.holdback_rate, seed=policy.holdback_seed
     ):

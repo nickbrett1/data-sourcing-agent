@@ -36,6 +36,13 @@ services:
       # at the mount below so it survives a Watchtower recreate; the image-layer
       # default would not (agent/register.py).
       AGENT_STATE_DIR: ${AGENT_STATE_DIR:-/state}
+      # The gate switch. Unset/blank = observe-only: the gate runs and logs its
+      # verdict but nothing routes on it. "1" = enforce the ASK-PATH (a computed
+      # reject is still only observed), at the D2 cut in the frozen rolling cutoff
+      # `/state/gate-cutoff.json` when armed, else the provisional 0.91. Refreshed
+      # by `python -m agent.cutoff`; without a frozen cutoff it still enforces at
+      # the provisional cut. Move this line to go back to watching.
+      GATE_ENFORCE: ${GATE_ENFORCE:-}
       # roost fleet visibility (optional). Blank = not in the fleet, and the
       # client is not built at all (fail-open). There is no derivable default:
       # roost is on a different Docker network (`roost_default`) from this

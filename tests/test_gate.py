@@ -320,6 +320,29 @@ def test_enforce_routes_the_computed_action_when_enforcing():
     assert outcome.holdback is False
 
 
+def test_enforce_observes_an_action_outside_the_enforced_set():
+    """The cautious start routes the ask-path only: a computed reject is admitted."""
+    policy = GatePolicy(
+        enforce=True, holdback_rate=0.0, enforce_actions=frozenset({GateAction.ask_clarifying})
+    )
+    decision = decide({D1: NoulAnswer(noul=0.01)})  # computed: reject
+    outcome = enforce(decision, "req-1", policy)
+    assert outcome.action is GateAction.proceed
+    assert outcome.computed is GateAction.reject
+    assert outcome.holdback is False  # admitted by policy, not by the dice
+    assert "not in the enforced set" in outcome.reason
+
+
+def test_the_ask_path_is_routed_while_the_reject_path_is_observed():
+    policy = GatePolicy(
+        enforce=True, holdback_rate=0.0, enforce_actions=frozenset({GateAction.ask_clarifying})
+    )
+    clarify = decide({D3: ScoreAnswer(score=float(D3_CLOSE - 1))})
+    assert enforce(clarify, "req-1", policy).action is GateAction.ask_clarifying
+    reject = decide({D1: NoulAnswer(noul=0.01)})
+    assert enforce(reject, "req-2", policy).action is GateAction.proceed
+
+
 def test_enforce_admits_a_would_be_stop_via_the_holdback_slice():
     # rate 1.0 admits everything that would otherwise be stopped.
     policy = GatePolicy(enforce=True, holdback_rate=1.0)

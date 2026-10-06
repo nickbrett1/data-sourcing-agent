@@ -39,3 +39,10 @@ venv/
 # Python build artifacts
 # build/ is already ignored by "build"; dist/ was not.
 dist/
+
+# Agent runtime state (generated in the working dir when AGENT_STATE_DIR is unset).
+# The log, labels and frozen cutoff are data, not source: they must never be committed.
+/gate-log.jsonl
+/gate-labels.jsonl
+/gate-cutoff.json
+state/
