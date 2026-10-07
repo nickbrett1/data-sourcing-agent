@@ -1,0 +1,26 @@
+# Dagu job: is the gate in sync?
+#
+# Runs the drift check on a daily schedule. `python -m agent.summary --check` exits
+# non-zero when anything is out of sync — the cut is stale, the grades say the cut
+# should move, or grading has fallen behind — so the alert is Dagu's normal
+# failure notification and this stays a plain command (no alerting logic here).
+#
+# Requires the grader service to be reachable from wherever Dagu runs. Configure
+# the failure handler for your notifier (email/slack/webhook) — left to the
+# deployment, since Dagu's sink is environment-specific.
+
+schedule: "0 9 * * *"   # daily, an hour after the intended cutoff re-freeze
+timezone: UTC
+
+steps:
+  - name: check-drift
+    command: python -m agent.summary --check
+    # Point this at the grader service (which reads the shared /state volume). If
+    # Dagu runs on the NAS host rather than in the container:
+    #   command: curl -fsS http://<nas>:8801/api/summary > /tmp/gate.json && \
+    #            python -c "import json,sys; s=json.load(open('/tmp/gate.json'));
+    #                       sys.exit(0 if s['status']=='ok' else 1)"
+
+handlerOn:
+  failure:
+    command: echo "gate out of sync — run: python -m agent.summary"

@@ -20,3 +20,29 @@
       mappings:
         - field: status
           label: Status
+
+# --- beyond the generated block: the grading service -------------------------
+# `python -m agent.grader` serves the grading UI and its read surface on :8801.
+# The widget below shows whether the door is in sync (agent/summary.py) — the
+# signal to move the D2 cut, and the alert subject for the Dagu job in
+# deploy/dagu/gate-drift.yaml. It needs the grader reachable from the Homepage
+# container, i.e. the port published, which is a deliberate exposure (the grader
+# has no auth). Adjust the URL to your NAS host.
+
+- data-sourcing-agent-grader:
+    icon: sh-docker
+    href: http://nas:8801/
+    description: grade the gate's decisions
+    widget:
+      type: customapi
+      refreshInterval: 60000
+      url: http://nas:8801/api/summary
+      mappings:
+        - field: status
+          label: Status
+        - field: issue
+          label: Sync
+        - field: coverage_pct
+          label: Graded %
+        - field: cut_age_hours
+          label: Cut age (h)

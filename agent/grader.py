@@ -23,6 +23,7 @@ from starlette.routing import Route
 from agent.gate_report import load_records
 from agent.grades import append_grade, load_grades
 from agent.samples import load_samples
+from agent.summary import build_summary
 
 PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Grade the door</title>
@@ -199,9 +200,22 @@ async def grade(request: Request) -> JSONResponse:
     return JSONResponse({"request_id": saved.request_id, "verdict": saved.verdict.value})
 
 
+async def summary(_request: Request) -> JSONResponse:
+    """The read surface Homepage and Dagu consume: is the door in sync?"""
+    return JSONResponse(build_summary())
+
+
 def create_app() -> Starlette:
     """The grading server. Read-only over the logs; writes only grades."""
-    return Starlette(routes=[Route("/", index), Route("/api/queue", queue), Route("/api/grade", grade, methods=["POST"])])
+    return Starlette(
+        routes=[
+            Route("/", index),
+            Route("/api/queue", queue),
+            Route("/api/grade", grade, methods=["POST"]),
+            Route("/api/summary", summary),
+            Route("/healthz", lambda _r: JSONResponse({"status": "ok"})),
+        ]
+    )
 
 
 app = create_app()
