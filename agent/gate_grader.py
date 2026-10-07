@@ -31,7 +31,9 @@ from agent.grades import Verdict, append_grade, load_grades
 from agent.summary import build_summary
 
 mcp = MCPServer(
-    name="gate-grader",
+    # Project-prefixed, so a hub carrying several MCPs does not have to guess
+    # which project's gate this grades.
+    name="data-sourcing-gate-grader",
     instructions=(
         "Grade the gate's decisions: read the queue of requests the door ruled on, "
         "judge each from the request text and the ticket it produced, and record a "

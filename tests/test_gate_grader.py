@@ -73,7 +73,7 @@ def test_grades_tool_returns_the_history(tmp_path, monkeypatch):
 
 
 def test_the_server_exposes_the_tools():
-    assert gate_grader.mcp.name == "gate-grader"
+    assert gate_grader.mcp.name == "data-sourcing-gate-grader"
 
 
 def test_the_cli_defaults_to_stdio(monkeypatch):
