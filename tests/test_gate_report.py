@@ -118,3 +118,52 @@ def test_a_deeper_cut_moves_the_would_stop_banner(tmp_path):
 def test_d5_is_summarised_like_any_other_noul(tmp_path):
     path = _log(tmp_path, {D5: NoulAnswer(noul=0.3)}, GateDecision(action=GateAction.proceed))
     assert summarise(load_records(path)).questions[D5].median() == 0.3
+
+
+def _request(tmp_path, name, *, action, holdback, outcome):
+    path = _log(
+        tmp_path,
+        _answers(),
+        GateDecision(action=GateAction(action)),
+        request_id=name,
+    )
+    records = load_records(path)
+    for record in records:
+        record["holdback"] = holdback
+        record["downstream_outcome"] = outcome
+    return records
+
+
+def test_a_false_reject_is_visible_only_in_the_holdback_region(tmp_path):
+    """§6.6: a would-be stop the holdback admitted, later approved, is a false reject
+    — and the holdback region is the only place that can be seen."""
+    records = _request(tmp_path, "a", action="ask_clarifying", holdback=True, outcome="approved")
+    report = summarise(records)
+    assert report.regions["would_stop_admitted"]["approved"] == 1
+
+
+def test_a_false_accept_lands_in_the_let_through_region(tmp_path):
+    records = _request(tmp_path, "b", action="proceed", holdback=False, outcome="rejected")
+    report = summarise(records)
+    assert report.regions["let_through"]["rejected"] == 1
+
+
+def test_an_enforced_stop_is_confounded_not_a_false_reject(tmp_path):
+    """A stop that routed is NOT a false reject even if the ticket is later approved:
+    the request got the clarifying question in between."""
+    records = _request(tmp_path, "c", action="ask_clarifying", holdback=False, outcome="approved")
+    report = summarise(records)
+    assert "would_stop_admitted" not in report.regions
+    assert report.regions["stopped"]["approved"] == 1
+
+
+def test_an_unreviewed_region_reads_as_unlabelled(tmp_path):
+    records = _request(tmp_path, "d", action="proceed", holdback=False, outcome=None)
+    assert summarise(records).regions["let_through"]["unlabelled"] == 1
+
+
+def test_the_render_shows_the_was_jev_wrong_view(tmp_path):
+    records = _request(tmp_path, "e", action="ask_clarifying", holdback=True, outcome="approved")
+    out = render(summarise(records))
+    assert "Was Jev wrong?" in out
+    assert "false REJECT" in out

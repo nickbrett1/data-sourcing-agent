@@ -150,6 +150,9 @@ class GateReport:
     labelled: int
     policy: GatePolicy
     outcomes: Counter = field(default_factory=Counter)
+    # region -> Counter(outcome or "unlabelled"). The "was Jev wrong?" view: the
+    # outcome means a different thing in each region, and `stopped` is confounded.
+    regions: dict[str, Counter] = field(default_factory=dict)
 
     @property
     def would_stop(self) -> int:
@@ -163,25 +166,54 @@ class GateReport:
         return self.would_stop / self.requests if self.requests else 0.0
 
 
+def _region(computed: str, holdback: bool) -> str:
+    """Which of the three parts of the score space a request landed in.
+
+    The three parts are the whole answer to "was Jev wrong?" — because the label
+    means a different thing in each, and one of them has no label at all:
+
+    * `let_through`   — Jev said pass. A `rejected`/`reran` downstream is a Jev
+                        false-accept, measured (but §6.5.1: not cleanly for D2).
+    * `would_stop_admitted` — Jev said stop, the holdback admitted it anyway. An
+                        `approved` downstream is a Jev false-reject, MEASURED — the
+                        only place a false reject is ever visible (§6.6).
+    * `stopped`       — Jev said stop and the door routed it. The outcome is
+                        confounded: the request then got the clarifying question, so
+                        a later `approved` cannot say whether the stop was right.
+    """
+    if computed == "proceed":
+        return "let_through"
+    return "would_stop_admitted" if holdback else "stopped"
+
+
 def summarise(records: list[dict], policy: GatePolicy = DEFAULT_POLICY) -> GateReport:
     """Fold the raw records into the report — one pass, no model, deterministic."""
     requests = {r.get("request_id") for r in records if r.get("request_id")}
-    # The computed action is recorded per row; count it once per request via its
-    # first row so a 4-question request does not count as 4 requests.
-    seen: set = set()
+    # The per-request facts (computed action, holdback, outcome) are recorded on
+    # every row, so gather them once per request rather than four times.
+    per_request: dict[str, dict] = {}
+    for record in records:
+        rid = record.get("request_id")
+        if rid is None:
+            continue
+        facts = per_request.setdefault(rid, {"action": "proceed", "holdback": False, "outcome": None})
+        facts["action"] = record.get("action_computed", "proceed")
+        facts["holdback"] = facts["holdback"] or bool(record.get("holdback"))
+        if record.get("downstream_outcome"):
+            facts["outcome"] = record["downstream_outcome"]
     actions: Counter = Counter()
     holdbacks = 0
     outcomes: Counter = Counter()
-    for record in records:
-        rid = record.get("request_id")
-        if rid in seen:
-            continue
-        seen.add(rid)
-        actions[record.get("action_computed", "proceed")] += 1
-        if record.get("holdback"):
+    regions: dict[str, Counter] = {}
+    for facts in per_request.values():
+        actions[facts["action"]] += 1
+        if facts["holdback"]:
             holdbacks += 1
-        if record.get("downstream_outcome"):
-            outcomes[record["downstream_outcome"]] += 1
+        if facts["outcome"]:
+            outcomes[facts["outcome"]] += 1
+        regions.setdefault(_region(facts["action"], facts["holdback"]), Counter())[
+            facts["outcome"] or "unlabelled"
+        ] += 1
     timestamps = sorted(r["ts"] for r in records if r.get("ts"))
     return GateReport(
         requests=len(requests),
@@ -192,6 +224,7 @@ def summarise(records: list[dict], policy: GatePolicy = DEFAULT_POLICY) -> GateR
         computed_actions=actions,
         holdbacks=holdbacks,
         outcomes=outcomes,
+        regions=regions,
         labelled=sum(
             1
             for r in records
@@ -284,6 +317,27 @@ def render(report: GateReport) -> str:
     if report.holdbacks:
         add(f"Holdback admissions: {report.holdbacks} (sampled rejected region, §6.6)")
         add("")
+
+    add("Was Jev wrong? (outcome by region — the only place a false reject is visible)")
+    add("-" * 74)
+    if not report.regions:
+        add("  (no requests)")
+    for region, interpretation in (
+        ("let_through", "Jev said pass -> a `rejected`/`reran` here is a false ACCEPT"),
+        ("would_stop_admitted", "Jev said stop, holdback admitted -> an `approved` here is a false REJECT"),
+        ("stopped", "Jev said stop and it routed -> outcome confounded by the clarifying question"),
+    ):
+        counts = report.regions.get(region)
+        if not counts:
+            continue
+        total = sum(counts.values())
+        tally = ", ".join(f"{name}={count}" for name, count in counts.most_common())
+        add(f"  {region:<22} n={total:<5} {tally}")
+        add(f"  {'':<22} {interpretation}")
+    add("")
+    add("  A region with only `unlabelled` is the honest state: nothing has been")
+    add("  reviewed yet. D2's false accepts stay invisible even once it is (§6.5.1).")
+    add("")
 
     return "\n".join(lines)
 
