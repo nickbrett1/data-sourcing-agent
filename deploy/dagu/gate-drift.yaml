@@ -27,4 +27,7 @@ steps:
 
 handlerOn:
   failure:
-    command: echo "gate out of sync — run: python -m agent.summary"
+    # Push the drift to ntfy. The topic lives in NTFY_TOPIC (default
+    # data-sourcing-jev-threshold-9831) and the base in NTFY_URL (default
+    # https://ntfy.sh), so the NAS value is configuration, not a hard-coded YAML.
+    command: python -m agent.notify
