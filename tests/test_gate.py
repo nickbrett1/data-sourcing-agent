@@ -62,8 +62,9 @@ def test_the_question_set_excludes_d4_and_d5_is_conditional():
     assert qs[D1].type == "noul"
     assert qs[D3].type == "score"
     assert qs[D3].criteria == D3_LEVELS
-    # D5 appears only when the estimate clears the materiality floor.
-    assert D5 not in questions(estimate_usd=1.0)
+    # D5 appears only when the estimate clears the materiality floor ($1.00).
+    assert D5 not in questions(estimate_usd=0.99)
+    assert D5 in questions(estimate_usd=1.0)
     assert D5 in questions(estimate_usd=12.74)
 
 
@@ -181,8 +182,8 @@ def test_cost_questions_fire_only_at_or_above_the_materiality_floor():
     post-price checkpoint asks nothing else, since D1/D2/D3 were judged upfront."""
     assert cost_questions(None) == {}
     assert cost_questions(0.0) == {}
-    assert cost_questions(4.99) == {}
-    assert set(cost_questions(5.0)) == {D5}
+    assert cost_questions(0.99) == {}
+    assert set(cost_questions(1.0)) == {D5}
     assert set(cost_questions(12.74)) == {D5}
     assert cost_questions(12.74)[D5].type == "noul"
 
@@ -254,7 +255,7 @@ def test_ask_cost_gate_makes_no_call_below_the_floor():
         client=httpx.AsyncClient(base_url="http://litellm:4000", transport=httpx.MockTransport(handler)),
     )
     answers, decision = asyncio.run(
-        ask_cost_gate(client, GateState(raw_request="x", parsed_intent="y"), 1.0)
+        ask_cost_gate(client, GateState(raw_request="x", parsed_intent="y"), 0.99)
     )
     assert calls["n"] == 0
     assert answers == {}

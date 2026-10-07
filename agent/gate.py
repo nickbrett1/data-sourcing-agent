@@ -115,8 +115,11 @@ class GateAction(StrEnum):
 
 
 # D5 fires only when spend is material (gate memo §2). The floor is an OPEN
-# decision (gate memo §6 #1) — a number, or `> k x typical`. This is a placeholder.
-MATERIALITY_FLOOR_USD = 5.0
+# decision (gate memo §6 #1) — a number, or `> k x typical`. Set to $1.00: cheap
+# enough that the only requests skipping D5 are ones where "is the spend
+# proportionate?" has no interesting answer. The floor decides *whether* D5 asks;
+# the D5 cut (D5_CUT_PLACEHOLDER) decides *how far off* is too far — two levers.
+MATERIALITY_FLOOR_USD = 1.0
 
 
 def _d5_question() -> Noul:
