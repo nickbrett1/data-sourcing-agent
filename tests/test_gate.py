@@ -375,3 +375,13 @@ def test_should_retain_state_for_anything_the_door_would_stop():
     assert should_retain_state(decide({D1: NoulAnswer(noul=0.01)})) is True
     assert should_retain_state(decide({D3: ScoreAnswer(score=0.0)})) is True
     assert should_retain_state(decide(_answers(0.99, 0.99))) is False
+
+
+def test_every_question_has_a_grader_legend():
+    """The log stores codes; the grader shows prose. Every code must have a line."""
+    from agent.gate import D1, D2, D3, D5, QUESTION_LEGEND, question_legend
+
+    assert set(QUESTION_LEGEND) == {D1, D2, D3, D5}
+    assert question_legend(D2).startswith("Specification sufficient")
+    assert "d2_specification_sufficient" not in question_legend(D2)
+    assert question_legend("d9_unknown") == "d9_unknown"

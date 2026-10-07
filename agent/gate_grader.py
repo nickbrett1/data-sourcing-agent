@@ -1,9 +1,13 @@
 """The grading MCP — so an agent can do the grading loop, not just a browser.
 
-Three tools over the same streams the UI uses: read the queue, record a verdict,
-read the status. Nothing here is new logic — it is the MCP skin over
-`agent.grades`, `agent.grader`, and `agent.summary`, so the API, the UI, and an agent
-all move through the same functions and cannot drift apart.
+Tools over the same streams the UI uses: read the queue (`next_request`/`queue`),
+record a verdict (`record_grade`), read the status (`status`/`grades`), and look up
+what a question code means (`legend`). Nothing here is new logic — it is the MCP skin
+over `agent.grades`, `agent.grader`, and `agent.summary`, so the API, the UI, and an
+agent all move through the same functions and cannot drift apart.
+
+Each Jev answer is returned with a plain-English `means` (from `agent.gate`), so a
+grader never has to hold the `d1_*`/`d2_*` codes in their head.
 
 Run it over stdio (the client launches it):
 
@@ -26,6 +30,7 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
+from agent.gate import QUESTION_LEGEND
 from agent.grader import build_queue
 from agent.grades import Verdict, append_grade, load_grades
 from agent.summary import build_summary
@@ -38,12 +43,22 @@ mcp = MCPServer(
         "Grade the gate's decisions: read the queue of requests the door ruled on, "
         "judge each from the request text and the ticket it produced, and record a "
         "verdict. Verdicts are right / too_strict (a false reject -> lower the cut) / "
-        "too_lenient (a false accept -> raise the cut) / unclear."
+        "too_lenient (a false accept -> raise the cut) / unclear. The question codes "
+        "(D1 remit, D2 specification sufficient, D3 dataset fit, D5 cost "
+        "proportionate) are spelled out beside each answer in `means`; call `legend` "
+        "for the full mapping."
     ),
 )
 
 
-@mcp.tool(description="The next ungraded request, with its Jev scores, the door's call, and the ticket.")
+@mcp.tool(
+    description=(
+        "The next ungraded request: its text, the ticket the door produced, the "
+        "door's call, and each Jev answer. Every `jev` entry carries a plain-English "
+        "`means` describing what the question asked (D1 remit, D2 specification, "
+        "D3 dataset fit, D5 cost) so you need not remember the codes."
+    )
+)
 def next_request() -> dict | None:
     """Return the first request with no verdict, or None when the queue is empty."""
     for item in build_queue():
@@ -52,13 +67,30 @@ def next_request() -> dict | None:
     return None
 
 
-@mcp.tool(description="A page of requests to grade, oldest first; pass only_ungraded=false to include graded ones.")
+@mcp.tool(
+    description=(
+        "A page of requests to grade, oldest first; pass only_ungraded=false to "
+        "include graded ones. Each `jev` entry includes a plain-English `means`."
+    )
+)
 def queue(limit: int = 10, only_ungraded: bool = True) -> list[dict]:
     """The grading queue. Small by default: grading is per-request attention."""
     items = build_queue()
     if only_ungraded:
         items = [item for item in items if not item["grade"]]
     return items[: max(0, limit)]
+
+
+@mcp.tool(
+    description=(
+        "What each question code means, in plain English — D1 remit, D2 "
+        "specification sufficient, D3 dataset fit, D5 cost proportionate — and "
+        "which way each answer cuts. Read this once if a row is unclear."
+    )
+)
+def legend() -> dict:
+    """The question-code legend: `d2_specification_sufficient` -> what it measures."""
+    return dict(QUESTION_LEGEND)
 
 
 @mcp.tool(description="Record a verdict on one request. verdict is right | too_strict | too_lenient | unclear.")
@@ -110,4 +142,4 @@ if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())
 
 
-__all__ = ["mcp", "next_request", "queue", "record_grade", "status", "grades", "Verdict"]
+__all__ = ["mcp", "next_request", "queue", "record_grade", "status", "grades", "legend", "Verdict"]
