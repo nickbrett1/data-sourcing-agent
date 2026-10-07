@@ -7,7 +7,7 @@ all move through the same functions and cannot drift apart.
 
 Run it over stdio (the client launches it):
 
-    python -m agent.grademcp
+    python -m agent.gate_grader
 
 Deliberately stdio by default, not an HTTP port: the thing it grades is local, and a
 stdio server inherits the caller's filesystem and permissions rather than needing
@@ -19,7 +19,7 @@ spawns stdio servers inside its own container, where this code and `/state` do n
 exist. For that, the same server also speaks streamable-http, so it can be
 registered by URL instead:
 
-    python -m agent.grademcp --transport streamable-http --host 0.0.0.0 --port 8802
+    python -m agent.gate_grader --transport streamable-http --host 0.0.0.0 --port 8802
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def grades() -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """`python -m agent.grademcp [--transport stdio|streamable-http] [--host H] [--port P]`.
+    """`python -m agent.gate_grader [--transport stdio|streamable-http] [--host H] [--port P]`.
 
     stdio is the default (a client launches us). streamable-http is for a hub that
     cannot spawn a process — it reaches us by URL instead. Both paths run the exact

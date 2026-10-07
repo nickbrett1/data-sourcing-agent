@@ -102,17 +102,17 @@ services:
     networks:
       - ai_proxy
 
-  # The grading MCP over streamable-http, for mcphub — which cannot run a stdio
+  # The gate-grader MCP over streamable-http, for mcphub — which cannot run a stdio
   # server: it spawns stdio inside its OWN container, where this image and /state
   # do not exist (it has no docker socket to exec into this one). So the same
   # gate-grader tools are exposed over HTTP instead, and mcphub registers the URL
-  # `http://data-sourcing-agent-grademcp:8802/mcp`. No host port: only `ai_proxy`
-  # peers need to reach it. Same image, same state volume as `app` and `grader`.
-  grademcp:
+  # `http://data-sourcing-agent-gate-grader:8802/mcp`. No host port: only
+  # `ai_proxy` peers need to reach it. Same image, same state volume as `app`/`grader`.
+  gate-grader:
     image: ghcr.io/nickbrett1/data-sourcing-agent:latest
-    container_name: data-sourcing-agent-grademcp
+    container_name: data-sourcing-agent-gate-grader
     restart: unless-stopped
-    command: ["python", "-m", "agent.grademcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8802"]
+    command: ["python", "-m", "agent.gate_grader", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8802"]
     environment:
       AGENT_STATE_DIR: ${AGENT_STATE_DIR:-/state}
     volumes:
