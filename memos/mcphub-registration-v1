@@ -55,18 +55,25 @@ Group entry: `{"name":"grademcp","tools":"all","prompts":"all","resources":"all"
 Rollback: `DELETE /api/groups/$DATA_GROUP/servers/grademcp` then
 `DELETE /api/servers/grademcp`.
 
-## The blocker
+## How it rolled out (done, 2026-10-07)
 
 The image publish step (`.buildkite/pipeline.yml`) is `if: build.branch == "main"`,
-and the deployed NAS image is `main` — which has **no `grademcp.py` or `grader.py`**.
-Those exist only on `feat/jev-gate`. So registration must follow:
+so the deployed NAS image (`main`, revision `9ad505f`) had **no `grademcp.py` or
+`grader.py`** — those lived only on `feat/jev-gate`. The sequence that landed it:
 
-1. **Merge PR #13** (`feat/jev-gate` → `main`) — triggers the GHCR build of `:latest`.
-2. **Sync the NAS compose** (`/volumeUSB1/usbshare/docker/data-sourcing-agent/compose.yaml`,
-   currently `app` only) with the repo's `grader` + `grademcp` services, then
-   `docker compose up -d` (Watchtower will also pull the new `:latest`).
-3. **Register** as above; verify `GET /api/servers/grademcp` and that it appears in
-   the `data` group.
+1. **Merged PR #13** (`feat/jev-gate` → `main`, merge commit `aefaa5ae`). Buildkite
+   build #42 passed and published `:latest` and `:aefaa5ae` to GHCR.
+2. **Synced the NAS compose**
+   (`/volumeUSB1/usbshare/docker/data-sourcing-agent/compose.yaml`, formerly `app`
+   only) with the repo's `grader` + `grademcp` services (backup kept as
+   `compose.yaml.bak-pr13-20261006-225544`), then `docker compose up -d`.
+3. **Registered** as above.
 
-Until step 1 lands, registering points at nothing. No change has been made on the
-NAS yet.
+Verified state: image `:latest` = `:aefaa5ae` = `8a685596dbc1`; container
+`data-sourcing-agent-grademcp` **running/healthy** on `ai_proxy` (`172.21.0.37`);
+`POST http://data-sourcing-agent-grademcp:8802/mcp` from the mcphub container →
+**HTTP 200**; `GET /api/servers/grademcp` → `status: connected` (tools
+`next_request`, `queue`, `record_grade`, `status`, `grades`); the `data` group is
+now `[databento-discovery, memos, grademcp]`. `GATE_ENFORCE` is still blank, so the
+gate deployed observe-only — as intended. Rollout log:
+`/volumeUSB1/usbshare/docker/data-sourcing-agent/ROLLOUT-PROGRESS-20261006.md`.
