@@ -74,3 +74,18 @@ def test_grades_tool_returns_the_history(tmp_path, monkeypatch):
 
 def test_the_server_exposes_the_tools():
     assert grademcp.mcp.name == "gate-grader"
+
+
+def test_the_cli_defaults_to_stdio(monkeypatch):
+    calls = []
+    monkeypatch.setattr(grademcp.mcp, "run", lambda **kw: calls.append(kw))
+    assert grademcp.main([]) == 0
+    assert calls == [{"transport": "stdio"}]
+
+
+def test_the_cli_can_serve_streamable_http_for_a_hub(monkeypatch):
+    """A hub that cannot spawn a process reaches the same tools over a URL."""
+    calls = []
+    monkeypatch.setattr(grademcp.mcp, "run", lambda **kw: calls.append(kw))
+    assert grademcp.main(["--transport", "streamable-http", "--port", "9001"]) == 0
+    assert calls == [{"transport": "streamable-http", "host": "0.0.0.0", "port": 9001, "stateless_http": True}]

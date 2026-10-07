@@ -9,9 +9,17 @@ Run it over stdio (the client launches it):
 
     python -m agent.grademcp
 
-Deliberately stdio, not an HTTP port: the thing it grades is local, and a stdio
-server inherits the caller's filesystem and permissions rather than needing its own
-exposure decision (unlike the UI, which is bound to localhost for that reason).
+Deliberately stdio by default, not an HTTP port: the thing it grades is local, and a
+stdio server inherits the caller's filesystem and permissions rather than needing
+its own exposure decision (unlike the UI, which is bound to localhost for that
+reason).
+
+The exception is a *hub* that cannot spawn a local process — mcphub on the NAS
+spawns stdio servers inside its own container, where this code and `/state` do not
+exist. For that, the same server also speaks streamable-http, so it can be
+registered by URL instead:
+
+    python -m agent.grademcp --transport streamable-http --host 0.0.0.0 --port 8802
 """
 
 from __future__ import annotations
@@ -73,9 +81,26 @@ def grades() -> dict:
     }
 
 
-def main() -> int:
-    """Serve the tools over stdio."""
-    mcp.run(transport="stdio")
+def main(argv: list[str] | None = None) -> int:
+    """`python -m agent.grademcp [--transport stdio|streamable-http] [--host H] [--port P]`.
+
+    stdio is the default (a client launches us). streamable-http is for a hub that
+    cannot spawn a process — it reaches us by URL instead. Both paths run the exact
+    same tools; only the wire changes.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="The gate-grader MCP, over stdio or streamable-http.")
+    parser.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
+    parser.add_argument("--host", default="0.0.0.0", help="bind address (streamable-http only)")
+    parser.add_argument("--port", type=int, default=8802, help="bind port (streamable-http only)")
+    args = parser.parse_args(argv)
+
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        # stateless_http: each POST stands alone, so the hub needs no session pinning.
+        mcp.run(transport="streamable-http", host=args.host, port=args.port, stateless_http=True)
     return 0
 
 
