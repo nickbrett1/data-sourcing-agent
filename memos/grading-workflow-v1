@@ -1,0 +1,74 @@
+# Grading the door — the workflow (2026-10-07)
+
+Companion to `grading-sample-v1` (the text+ticket sample) and
+`data-acquisition-agent-v1` §6.5.1. Built on `feat/jev-gate` (`agent/grades.py`,
+`agent/grader.py`).
+
+## Why not the CLI
+
+`python -m agent.samples` is a **dump**. Grading is not reading — it needs four
+things a dump cannot give:
+
+1. **One request at a time.** You cannot grade in bulk; the comparison is
+   per-request.
+2. **Resume.** Skip what is already graded; pick up the next.
+3. **Progress.** "17 of 240" is what makes the sitting finite.
+4. **A write.** The output is a verdict, not a printout.
+
+So it is a tool. `python -m agent.grader` serves one page on `localhost:8801`:
+one request, keyboard, progress bar, resumable.
+
+## The verdict vocabulary — the real decision
+
+The grade is on **the door's call**, not on the ticket and not on a single
+question, because the threshold is a property of the door. Three real answers and
+one honest non-answer:
+
+| Verdict | Means | Moves the cut |
+|---|---|---|
+| `right` | the door did the correct thing | — |
+| `too_strict` | it stopped a request that was actually fine (false reject) | **down** — ask fewer |
+| `too_lenient` | it let through a bad request (false accept) | **up** — ask more |
+| `unclear` | the artifact does not settle it | — |
+
+`too_strict`/`too_lenient` are the false reject / false accept the region table
+reports — but read off the **artifact**, where the outcome label only exists for
+work that proceeded. This is the payoff of the sample: the stop region becomes
+gradeable, so the two errors can be counted directly instead of inferred.
+
+The report prints the tally and the direction:
+
+```
+Your grades (a verdict on the door's call, from the grading UI)
+----------------------------------------------------------------
+  1 graded: right=0, too_strict=1, too_lenient=0, unclear=0
+  => too strict on 1 vs 0 — lower the cut (ask fewer).
+```
+
+Evenly-wrong is called out as *not a threshold problem* — if the door is too strict
+and too lenient in equal measure, the cut is not the lever and the questions are.
+
+## Shape
+
+Three append-only streams, all keyed by `request_id`, never sampled:
+
+| Stream | Carries | Written by |
+|---|---|---|
+| `gate-log.jsonl` | Jev's scores and the door's call — the **measurement** | the turn |
+| `gate-samples.jsonl` | request text + rendered ticket — the **evidence** | the turn |
+| `gate-grades.jsonl` | the **verdict** | a person, via the UI |
+
+## Open
+
+- **Where it runs.** Defaults to `127.0.0.1` because it has **no auth** and grading
+  is a single-person activity. Reaching it on the NAS means either a published port
+  (exposes it on the LAN, unauthenticated) or `docker exec` with a port-forward. A
+  compose service is possible but is a real exposure decision, not a default — same
+  family as the metrics-sink question in `D5TaBez3KoKmRdrXSuHhqK`.
+- **Grade at question level?** Today one verdict per request. A wrong-window error
+  is D2's; a wrong-*dataset* one is D3's. If the tally ever needs to move *one*
+  question's cut rather than the door's overall cut, the verdict will have to carry
+  which question it blames.
+- **The enforced path.** When `GATE_ENFORCE` flips, the stop branch returns before
+  rendering, so those requests stop producing samples — exactly the ones to grade.
+  The generate-regardless rule (`grading-sample-v1`) must land with the switch.

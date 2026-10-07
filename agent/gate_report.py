@@ -52,6 +52,8 @@ from agent.gate import (
 )
 from agent.gatelabels import apply_labels, load_labels
 from agent.gatelog import gate_log_path
+from agent.grades import Grade, Verdict, advice, load_grades
+from agent.grades import tally as grade_tally
 
 # The rates the report prices the day-one lever at: "if we can review the top N%".
 REVIEW_RATES = (0.01, 0.02, 0.05, 0.10, 0.20)
@@ -153,6 +155,7 @@ class GateReport:
     # region -> Counter(outcome or "unlabelled"). The "was Jev wrong?" view: the
     # outcome means a different thing in each region, and `stopped` is confounded.
     regions: dict[str, Counter] = field(default_factory=dict)
+    grades: dict[str, Grade] = field(default_factory=dict)
 
     @property
     def would_stop(self) -> int:
@@ -225,6 +228,7 @@ def summarise(records: list[dict], policy: GatePolicy = DEFAULT_POLICY) -> GateR
         holdbacks=holdbacks,
         outcomes=outcomes,
         regions=regions,
+        grades=load_grades(),
         labelled=sum(
             1
             for r in records
@@ -337,6 +341,17 @@ def render(report: GateReport) -> str:
     add("")
     add("  A region with only `unlabelled` is the honest state: nothing has been")
     add("  reviewed yet. D2's false accepts stay invisible even once it is (§6.5.1).")
+    add("")
+
+    add("Your grades (a verdict on the door's call, from the grading UI)")
+    add("-" * 64)
+    if not report.grades:
+        add("  none yet — `python -m agent.grader`, then `docker exec` it or open localhost:8801.")
+    else:
+        counts = grade_tally(report.grades)
+        line = ", ".join(f"{v.value}={counts[v]}" for v in Verdict)
+        add(f"  {len(report.grades)} graded: {line}")
+        add(f"  => {advice(report.grades)}")
     add("")
 
     return "\n".join(lines)
