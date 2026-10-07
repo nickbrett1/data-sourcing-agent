@@ -39,7 +39,7 @@ TOK=$(curl -s -X POST http://localhost:8781/api/auth/login \
 # 1) create the server
 curl -s -X POST http://localhost:8781/api/servers \
   -H "x-auth-token: $TOK" -H 'Content-Type: application/json' \
-  -d '{"name":"gate-grader","config":{
+  -d '{"name":"data-sourcing-gate-grader","config":{
         "type":"streamable-http",
         "url":"http://data-sourcing-agent-gate-grader:8802/mcp",
         "description":"Gate grading: next_request, queue, record_grade, status, grades",
@@ -48,22 +48,24 @@ curl -s -X POST http://localhost:8781/api/servers \
 # 2) add it to the live 'data' group
 curl -s -X POST http://localhost:8781/api/groups/$DATA_GROUP/servers \
   -H "x-auth-token: $TOK" -H 'Content-Type: application/json' \
-  -d '{"serverName":"gate-grader"}'
+  -d '{"serverName":"data-sourcing-gate-grader"}'
 ```
 
-Group entry: `{"name":"gate-grader","tools":"all","prompts":"all","resources":"all"}`.
-Rollback: `DELETE /api/groups/$DATA_GROUP/servers/gate-grader` then
-`DELETE /api/servers/gate-grader`.
+Group entry: `{"name":"data-sourcing-gate-grader","tools":"all","prompts":"all","resources":"all"}`.
+Rollback: `DELETE /api/groups/$DATA_GROUP/servers/data-sourcing-gate-grader` then
+`DELETE /api/servers/data-sourcing-gate-grader`.
 
 > Naming note: it first deployed under the generic name `grademcp`, which said it
-> grades *something* but not what. Renamed to **`gate-grader`** on 2026-10-07 —
-> the name the server already gave itself — across the module, the compose service,
-> and the mcphub registration.
+> grades *something* but not what. Renamed to **`gate-grader`**, then
+> project-prefixed to **`data-sourcing-gate-grader`**, on 2026-10-07 — across the
+> module (`agent/gate_grader.py`), the compose service, and the mcphub registration.
+> Only the MCP *name* carries the prefix; the compose service/container follow the
+> repo's existing style (`grader`, `data-sourcing-agent-grader`).
 
 ## How it rolled out (done, 2026-10-07)
 
 The image publish step (`.buildkite/pipeline.yml`) is `if: build.branch == "main"`,
-so the deployed NAS image (`main`, revision `9ad505f`) had **no `gate-grader.py` or
+so the deployed NAS image (`main`, revision `9ad505f`) had **no `gate_grader.py` or
 `grader.py`** — those lived only on `feat/jev-gate`. The sequence that landed it:
 
 1. **Merged PR #13** (`feat/jev-gate` → `main`, merge commit `aefaa5ae`). Buildkite
@@ -77,8 +79,8 @@ so the deployed NAS image (`main`, revision `9ad505f`) had **no `gate-grader.py`
 Verified state: image `:latest` = `:aefaa5ae` = `8a685596dbc1`; container
 `data-sourcing-agent-gate-grader` **running/healthy** on `ai_proxy` (`172.21.0.37`);
 `POST http://data-sourcing-agent-gate-grader:8802/mcp` from the mcphub container →
-**HTTP 200**; `GET /api/servers/gate-grader` → `status: connected` (tools
+**HTTP 200**; `GET /api/servers/data-sourcing-gate-grader` → `status: connected` (tools
 `next_request`, `queue`, `record_grade`, `status`, `grades`); the `data` group is
-now `[databento-discovery, memos, gate-grader]`. `GATE_ENFORCE` is still blank, so the
+now `[databento-discovery, memos, data-sourcing-gate-grader]`. `GATE_ENFORCE` is still blank, so the
 gate deployed observe-only — as intended. Rollout log:
 `/volumeUSB1/usbshare/docker/data-sourcing-agent/ROLLOUT-PROGRESS-20261006.md`.
