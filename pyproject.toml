@@ -31,7 +31,11 @@ dependencies = [
     # it as a transitive of something else (it is only pulled in by google-genai
     # today, which nothing here depends on). `>=14` because this is the first
     # version whose client takes `additional_headers` (the kwarg the client uses).
-    "websockets>=14"
+    "websockets>=14",
+    # The grading MCP server (agent/grademcp.py). `mcp` 2.x renamed FastMCP to
+    # MCPServer; declared explicitly, pinned to the v2 API the module is written
+    # against, rather than inheriting whatever version arrives transitively.
+    "mcp>=2"
 ]
 
 [project.optional-dependencies]

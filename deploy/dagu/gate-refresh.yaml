@@ -1,0 +1,26 @@
+# Dagu job: re-freeze the rolling cutoff — but only when it is due.
+#
+# The companion to gate-drift.yaml. That job *detects* drift; this one *acts* on
+# it, so the alert has a fire brigade.
+#
+# The guarded flag is the whole point. `python -m agent.cutoff` re-freezes
+# unconditionally, and an unconditional daily fire would bump the freeze watermark
+# every day, reset `unused_graded` to zero, and silence the very "freeze now"
+# signal this is meant to answer. `--if-due` asks `agent.summary` first and does
+# nothing unless the bucket has filled (or the week-long backstop is overdue), so
+# the freezes stay tied to material actually arriving, not to the clock.
+#
+# Runs before the drift check, so that check sees the cut this job may have just
+# refreshed. Both read the shared /state volume.
+
+schedule: "30 8 * * *"   # daily, half an hour before the drift check
+timezone: UTC
+
+steps:
+  - name: refreeze-if-due
+    command: python -m agent.cutoff --if-due
+    # If Dagu runs on the NAS host rather than in the app container:
+    #   command: docker exec data-sourcing-agent python -m agent.cutoff --if-due
+
+# A re-freeze is routine, not an incident: no failure handler. A non-zero exit
+# (an unwritable state volume, say) should still page, so it is left to Dagu.

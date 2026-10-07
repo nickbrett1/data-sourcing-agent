@@ -1,0 +1,63 @@
+# The grading sample — text, Jev, and the ticket (2026-10-07)
+
+Companion to `data-acquisition-agent-v1` §6.5.1 and the enforcement memos. Built on
+`feat/jev-gate` (`agent/samples.py`).
+
+## The gap this closes
+
+The shadow log records what Jev **answered** and what the door **did**. It does not
+record what the agent **produced**. That missing half is why the stop region looked
+ungradeable: *"Jev said stop"* is not, on its own, right or wrong — to grade it you
+need the artifact the stop suppressed.
+
+But generating that artifact **costs nothing**. The agent is draft-only: the ticket
+is a file, `metadata.get_cost` is a free metadata call, and the download needs a
+human. So the artifact can always be produced and kept, whether or not the door
+routes the turn.
+
+**Decision: log the request text and the rendered ticket for every request, keyed by
+`request_id`.** A human reads `text | Jev scores | ticket | door verdict` and grades
+directly.
+
+## What it changes
+
+- **It dissolves the holdback's job for grading.** The holdback exists so the stop
+  region yields a *consequence* signal at the cost of admitting a slice. The sample
+  yields a *judgment* signal for the same region, with nothing admitted. Both remain
+  useful, and they answer different questions: holdback = *did stopping do harm*,
+  sample = *was stopping correct*.
+- **It partly rescues D2.** §6.5.1's complaint was that the free approve/reject label
+  cannot separate "right ticket" from "right-shape-wrong-window". A human comparing
+  the prose against the rendered ticket *can* — that comparison is exactly what the
+  label lacked.
+- **Under enforcement it matters more.** Once the door stops requests, the stop
+  region stops producing artifacts — the §6.6 deletion problem again. So the rule is:
+  **generate regardless of the door, log it, do not send it.** `append_sample` is
+  callable from the would-be-stop branch for exactly this reason.
+
+## Shape
+
+Two append-only streams, joined on `request_id`, because they are different things:
+
+| Stream | Carries | Cardinality | Sampled? |
+|---|---|---|---|
+| `gate-log.jsonl` | scores, cuts, actions — the **measurement** | high on purpose | never |
+| `gate-samples.jsonl` | text + rendered ticket — the **evidence** | one row per request | never |
+
+`python -m agent.samples` prints the grading queue: each request as request → Jev →
+door → ticket, oldest first.
+
+## Open
+
+- **Where the grade is written.** `render_one` shows the queue; recording a verdict
+  is not wired. The existing label stream (`agent.gatelabels`) has
+  `approved`/`rejected`/`reran`, which grade *ticket quality* and are reinterpreted by
+  region in the report — but a score *of Jev's verdict* ("was this stop correct?") is
+  a different and cleaner object. Needs a small vocabulary decision.
+- **Retention.** `gate-samples.jsonl` holds raw request prose and full tickets —
+  more personal than the score log. Same open question as the metrics memo
+  (`D5TaBez3KoKmRdrXSuHhqK` §3).
+- **Does the sample get written when enforcement stops the turn**, i.e. is the
+  generate-regardless rule implemented for the enforced path? Not yet — observe-only
+  generates everything, so today the set is complete; the enforced path returns
+  before rendering and would need the branch added at the switch.

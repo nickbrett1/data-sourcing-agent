@@ -1,0 +1,69 @@
+# The rolling cutoff — what we start with (2026-10-06)
+
+Companion to `data-acquisition-agent-v1` §8 #3 and `Aq6WWhuLCpr3xiscRiLoiq`
+(enforcement + holdback). This records the *starting configuration* and the code
+that makes it real (`agent/cutoff.py`, commit on `feat/jev-gate`).
+
+## The decision
+
+Enforce the **ask-path** at a **rate**, not a probability. A rate is a statement
+about a population ("escalate the top N%"), needs no labels, and assumes only that
+Jev's score is monotone in risk — so it is settable today (§8 #3a). A probability
+assumes calibration and waits for the log.
+
+## The two knobs, and the start values
+
+| Knob | Start | Where |
+|---|---|---|
+| **Rate `N`** — fraction willing to review | **10%** | `cutoff.DEFAULT_RATE`; the report prices 1/2/5/10/20% |
+| **Window / floor** — trailing D2 scores, and the floor before arming | **200 / 50, re-frozen daily** | `cutoff.DEFAULT_WINDOW`, `cutoff.DEFAULT_MIN_N` |
+
+Everything else starts frozen: D3 ≥ `close`, holdback **2%** (§6.6 band).
+
+## The one thing that is new
+
+A rate is not a per-request quantity. Enforcing needs a cutoff computed over a
+window, **frozen**, and applied per-request until refreshed. `agent/cutoff.py`:
+
+* `arm(scores, rate, window, min_n)` → a `Cutoff` (value + provenance). Below the
+  floor it returns **unarmed** — a confident number off three requests is worse
+  than no number.
+* `d2_scores(records)` → the D2 probabilities from the log. Failed answers are
+  "no opinion", not values, so a Jev outage cannot move the cutoff.
+* `refresh()` → read log, arm, write `/state/gate-cutoff.json`. The daily call.
+* `resolve_policy()` → the policy in force at start-up.
+
+## Enforced set: the ask-path only
+
+`GatePolicy.enforce_actions` defaults to *all* actions, so a bare `enforce=True`
+is complete. The cautious start narrows it to `{ask_clarifying}`:
+
+* a wrong clarify costs **one question**;
+* a wrong reject **bounces a real request with no human touch**.
+
+So a computed `reject` (D1 "not in remit") is admitted-and-logged, exactly like a
+holdback. It stays observed until the log says a hard stop earns its keep.
+
+## Day one has no log — start anyway
+
+There is no population yet, so there is no rate to compute. The switch therefore
+goes on **at the provisional probability cut (0.91)**, which the log already
+stamps as `threshold_at_time`. The first time `refresh` finds 50 D2 scores, the
+measured rate boundary replaces it — same switch, a real number.
+
+## The switch
+
+One env var, resolved once at import (`resolve_policy`):
+
+```
+GATE_ENFORCE=1     # on  (ask-path only). Unset/blank = observe-only.
+```
+
+Set it in the NAS `.env` (the compose default is blank). Re-freeze the cutoff on a
+cadence with `docker exec <agent> python -m agent.cutoff`.
+
+## Why not just enforce everything at once
+
+Because the two failure actions are not equally cheap. This start buys the
+learning (does the clarify path fire at a sane rate?) at the price of one
+question, and buys nothing that cannot be undone by one line.

@@ -1,0 +1,63 @@
+# The grading surface — API, MCP, Homepage, Dagu (2026-10-07)
+
+Companion to `grading-workflow-v1` (the UI) and `D5TaBez3KoKmRdrXSuHhqK` (the
+metrics-exposure decision, which this partly revisits). On `feat/jev-gate`.
+
+## Three consumers, one function
+
+The UI, Homepage, Dagu, and an agent all want the same answers, so they share the
+underlying functions and cannot drift:
+
+| Consumer | Surface | Backed by |
+|---|---|---|
+| a person | the page at `/` | `agent.grader.build_queue` |
+| Homepage / Dagu | `GET /api/summary` | `agent.summary.build_summary` |
+| an agent | MCP tools (stdio) | `agent.grademcp` — same functions |
+
+## The read surface: `agent/summary.py`
+
+One payload answering three questions, because they are what "out of sync" means:
+
+1. **Is the cut fresh?** The enforced D2 cut is frozen from a window and re-frozen
+   on a cadence (`rolling-cutoff-start-v1`). Every threshold is settable from it.
+2. **Do the grades agree with the cut?** A `too_strict`/`too_lenient` imbalance past
+   a margin names a *direction* to move — the whole point of grading.
+3. **Is grading keeping up?** A backlog makes (2) stale even when (1) is fresh.
+
+`python -m agent.summary [--json|--check]`. `--check` exits non-zero on drift, so
+Dagu's ordinary failure notification is the alert and no alerting logic lives here.
+
+## The MCP: `agent/grademcp.py`
+
+Stdio, not an HTTP port — deliberately. The thing it grades is local, and a stdio
+server inherits the caller's filesystem rather than needing its own exposure
+decision (unlike the UI, bound to localhost for exactly that reason). Tools:
+`next_request`, `queue`, `record_grade`, `status`, `grades`. `mcp` is now declared
+in `pyproject.toml` (v2 renamed FastMCP → `MCPServer`; pinned `>=2`).
+
+## The tension with the metrics memo — stated, not hidden
+
+`D5TaBez3KoKmRdrXSuHhqK` argued against a per-agent URL endpoint: bespoke, pull-only,
+a second job on the serving process, no retention. Three of the four are answered
+here, one is not:
+
+- **Second job** — answered: `agent/grader.py` is its own entrypoint, own process.
+  The ticket-serving agent is untouched.
+- **Pull-only** — answered: Dagu supplies the push/schedule; the endpoint is
+  pull-shaped by design and something else does the watching.
+- **No aggregation** — answered: the payload is aggregates only; no per-request
+  label ever reaches a consumer (the cardinality rule holds).
+- **Bespoke per agent** — **not answered.** This is a gate-specific surface. If
+  every agent grows one, it is rebuilt N times. The honest read: this is a
+  *capability* endpoint (grade, and judge a threshold), not a metrics sink, so it is
+  a different object from the one that memo rejected — but the precedent is real
+  and should be revisited if a second agent needs the same shape.
+
+## Open
+
+- **Exposure.** The UI and summary default to `127.0.0.1`; both Homepage and Dagu
+  need the grader reachable, i.e. a published port, and there is **no auth**. That
+  is the decision this creates, and it is not made here.
+- **Grade granularity.** One verdict per request; see `grading-workflow-v1`.
+- **The enforced path** still returns before rendering, so samples stop for
+  stopped requests — the generate-regardless rule must land with the switch.

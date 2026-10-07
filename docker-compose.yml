@@ -36,6 +36,13 @@ services:
       # at the mount below so it survives a Watchtower recreate; the image-layer
       # default would not (agent/register.py).
       AGENT_STATE_DIR: ${AGENT_STATE_DIR:-/state}
+      # The gate switch. Unset/blank = observe-only: the gate runs and logs its
+      # verdict but nothing routes on it. "1" = enforce the ASK-PATH (a computed
+      # reject is still only observed), at the D2 cut in the frozen rolling cutoff
+      # `/state/gate-cutoff.json` when armed, else the provisional 0.91. Refreshed
+      # by `python -m agent.cutoff`; without a frozen cutoff it still enforces at
+      # the provisional cut. Move this line to go back to watching.
+      GATE_ENFORCE: ${GATE_ENFORCE:-}
       # roost fleet visibility (optional). Blank = not in the fleet, and the
       # client is not built at all (fail-open). There is no derivable default:
       # roost is on a different Docker network (`roost_default`) from this
@@ -62,6 +69,56 @@ services:
       - "homepage.widget.url=http://localhost:8700/healthz"
       - "homepage.widget.mappings[0].field=status"
       - "homepage.widget.mappings[0].label=Status"
+    networks:
+      - ai_proxy
+
+  # The grading service: the UI plus the read surface (`/api/summary`) that
+  # Homepage and the Dagu job (deploy/dagu/gate-drift.yaml) consume. Same image,
+  # different entrypoint, same state volume. Published on the LAN (0.0.0.0) by
+  # decision (2026-10-07): there is NO AUTH, so it is read-only over the logs plus
+  # grade writes — treat it as a trusted-LAN tool, not an internet-facing one.
+  grader:
+    image: ghcr.io/nickbrett1/data-sourcing-agent:latest
+    container_name: data-sourcing-agent-grader
+    restart: unless-stopped
+    command: ["python", "-m", "agent.grader", "--host", "0.0.0.0", "--port", "8801"]
+    ports:
+      - "0.0.0.0:8801:8801"
+    environment:
+      AGENT_STATE_DIR: ${AGENT_STATE_DIR:-/state}
+    volumes:
+      - ${AGENT_STATE_HOST_DIR:-./state}:/state
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "homepage.group=Services"
+      - "homepage.name=gate grader"
+      - "homepage.href=http://nas:8801/"
+      - "homepage.widget.type=customapi"
+      - "homepage.widget.url=http://nas:8801/api/summary"
+      - "homepage.widget.mappings[0].field=status"
+      - "homepage.widget.mappings[0].label=Status"
+      - "homepage.widget.mappings[1].field=issue"
+      - "homepage.widget.mappings[1].label=Sync"
+    networks:
+      - ai_proxy
+
+  # The grading MCP over streamable-http, for mcphub — which cannot run a stdio
+  # server: it spawns stdio inside its OWN container, where this image and /state
+  # do not exist (it has no docker socket to exec into this one). So the same
+  # gate-grader tools are exposed over HTTP instead, and mcphub registers the URL
+  # `http://data-sourcing-agent-grademcp:8802/mcp`. No host port: only `ai_proxy`
+  # peers need to reach it. Same image, same state volume as `app` and `grader`.
+  grademcp:
+    image: ghcr.io/nickbrett1/data-sourcing-agent:latest
+    container_name: data-sourcing-agent-grademcp
+    restart: unless-stopped
+    command: ["python", "-m", "agent.grademcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8802"]
+    environment:
+      AGENT_STATE_DIR: ${AGENT_STATE_DIR:-/state}
+    volumes:
+      - ${AGENT_STATE_HOST_DIR:-./state}:/state
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     networks:
       - ai_proxy
 networks:
