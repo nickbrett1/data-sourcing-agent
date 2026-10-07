@@ -271,3 +271,30 @@ def test_a_shadow_generation_failure_never_raises(tmp_path, monkeypatch):
     ex._agent = _FakeAgent(boom=True)
     asyncio.run(ex._shadow_sample("text", None, "rid-x"))  # must not raise
     assert load_samples(tmp_path / "samples.jsonl") == {}
+
+
+class _FlakyAgent:
+    """Fails the first run, succeeds the second — one transient tool hiccup."""
+
+    def __init__(self, ticket):
+        self._ticket, self._calls = ticket, 0
+
+    async def run(self, _prompt):
+        self._calls += 1
+        if self._calls == 1:
+            raise RuntimeError("tool hiccup")
+        return type("R", (), {"output": self._ticket})()
+
+
+def test_a_transient_shadow_failure_is_retried(tmp_path, monkeypatch):
+    """A stopped request must keep its artifact even if the first run hiccups.
+
+    Observed live: the discovery MCP tool exhausted its retry budget and the whole
+    sample was lost. One more attempt recovers it.
+    """
+    monkeypatch.setenv("GATE_SAMPLE_PATH", str(tmp_path / "samples.jsonl"))
+    ex = _executor(_Interpreter(), _Jev())
+    ex._agent = _FlakyAgent(_ticket(1.0))
+    asyncio.run(ex._shadow_sample("text", None, "rid-flaky"))
+    samples = load_samples(tmp_path / "samples.jsonl")
+    assert samples["rid-flaky"].ticket.startswith("state:")

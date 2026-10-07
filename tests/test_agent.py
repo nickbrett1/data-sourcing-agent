@@ -561,3 +561,16 @@ def test_request_headers_reach_the_litellm_forwarder():
 
     assert response.status_code == 200
     assert seen.get("x-litellm-trace-id") == "trace-abc"
+
+
+def test_the_agents_allow_tool_retries():
+    """An MCP tool hiccup must not kill a run on the first failure.
+
+    Observed live: the discovery toolset exhausted the default budget of 1 retry
+    (`exceeded max retries count of 1`) and a stopped request lost its shadow
+    sample. The budget is now higher on both generative agents.
+    """
+    from agent import main
+
+    assert main.agent._max_tool_retries >= 2
+    assert main.interpreter._max_tool_retries >= 2

@@ -186,6 +186,8 @@ def build_interpreter(model, toolsets=None):
         instructions=INTERPRETER_INSTRUCTIONS,
         output_type=PromptedOutput(ParsedIntent),
         model_settings=ModelSettings(max_tokens=4096),
-        retries={"output": 3},
+        # Same tool-retry reasoning as the ticket agent in `main.py`: the
+        # discovery MCP tool can hiccup, and one retry is too few to recover.
+        retries={"output": 3, "tools": 3},
         toolsets=toolsets or [],
     )

@@ -166,7 +166,13 @@ agent = Agent(
     # Reasoning tokens bill against `max_tokens` on this model, so a low cap
     # truncates the answer before it is emitted. The default is too small.
     model_settings=ModelSettings(max_tokens=4096),
-    retries={"output": 3},
+    # `tools: 3`, not the default 1: an MCP tool call that fails gets one retry
+    # before the run dies with `UnexpectedModelBehavior(... exceeded max retries
+    # count of 1)`. Observed live on the shadow-generation path — the discovery
+    # toolset hiccupped and the whole stopped-request sample was lost. Two more
+    # attempts lets the model see the tool's error and correct the call, which is
+    # exactly what the retry budget is for.
+    retries={"output": 3, "tools": 3},
     toolsets=AGENT_TOOLSETS,
 )
 # The Validator layer. It runs on every model output; on failure it raises
@@ -326,13 +332,25 @@ class TicketAgentExecutor(AgentExecutor):
         is exactly the one a human most wants to grade, and generating a draft spends
         nothing (§grading-sample-v1). Best-effort: a failure here is logged, never
         raised — the turn is already being stopped on purpose.
+
+        The run is attempted twice. The discovery MCP toolset has been observed to
+        hiccup once (`exceeded max retries count of 1`) and lose the whole sample —
+        the one failure this path exists to prevent. A second attempt is cheap (a
+        draft spends nothing) and lets a transient tool or model fault clear.
         """
-        try:
-            prompt = ticket_prompt(user_input, intent) if intent is not None else user_input
-            result = await self._agent.run(prompt)
-            append_sample(request_id, user_input, render_ticket_yaml(result.output))
-        except Exception as exc:
-            print(f"[sample] shadow generation skipped: {exc!r}", flush=True)
+        prompt = ticket_prompt(user_input, intent) if intent is not None else user_input
+        attempts = 2
+        for attempt in range(1, attempts + 1):
+            try:
+                result = await self._agent.run(prompt)
+                append_sample(request_id, user_input, render_ticket_yaml(result.output))
+                return
+            except Exception as exc:
+                print(
+                    f"[sample] shadow generation failed ({request_id}, "
+                    f"attempt {attempt}/{attempts}): {exc!r}",
+                    flush=True,
+                )
 
     def _log_gate(
         self,
