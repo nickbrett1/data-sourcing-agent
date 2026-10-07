@@ -20,6 +20,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Route
 
+from agent.gate import question_legend
 from agent.gate_report import load_records
 from agent.grades import append_grade, load_grades
 from agent.samples import load_samples
@@ -94,9 +95,14 @@ function render() {
   const q = queue[i];
   const main = document.getElementById('main');
   if (!q) { main.innerHTML = '<div id="empty">Nothing to grade. Log some traffic first.</div>'; return; }
+  // Readable question name (the part before the colon) with the full
+  // explanation and the raw code on hover — the grader should not have to
+  // remember what `d2_specification_sufficient` means.
+  const qLabel = a => ((a.means || a.q || '').split(':')[0]).trim();
+  const qTitle = a => (a.means ? a.q + ' — ' + a.means : a.q);
   const jev = q.jev.map(a => a.failed
-      ? `<div><span>${esc(a.q)}</span><span class="fail">FAILED</span></div>`
-      : `<div><span>${esc(a.q)}</span><span>${esc(a.answer)}</span></div>`).join('');
+      ? `<div><span title="${esc(qTitle(a))}">${esc(qLabel(a))}</span><span class="fail">FAILED</span></div>`
+      : `<div><span title="${esc(qTitle(a))}">${esc(qLabel(a))}</span><span>${esc(a.answer)}</span></div>`).join('');
   const held = q.holdback ? '<span class="holdback">holdback: admitted</span>' : '';
   main.innerHTML = `
     <section>
@@ -158,7 +164,12 @@ def build_queue(*, records: list[dict] | None = None) -> list[dict]:
         door = rows[0].get("action_computed", "proceed")
         held = bool(rows[0].get("holdback"))
         jev = [
-            {"q": row.get("question_id"), "answer": row.get("answer"), "failed": bool(row.get("failed"))}
+            {
+                "q": row.get("question_id"),
+                "means": question_legend(row.get("question_id", "")),
+                "answer": row.get("answer"),
+                "failed": bool(row.get("failed")),
+            }
             for row in rows
         ]
         grade = grades.get(rid)

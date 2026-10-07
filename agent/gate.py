@@ -105,6 +105,27 @@ D5_CUT_PLACEHOLDER = 0.5
 # The holdback fraction (§6.6): ~1–5%. Exact value open (§8 #8); inert until enforced.
 HOLDBACK_RATE_PLACEHOLDER = 0.02
 
+# Grader-facing legend. The log stores question *codes*
+# (`d2_specification_sufficient`); a human grading a row should not have to hold
+# that mapping in their head, so the grader (UI and MCP) shows this prose beside
+# each answer. One line each: what it measures, and which way the answer cuts.
+QUESTION_LEGEND: dict[str, str] = {
+    D1: "In remit: is this a legitimate Databento historical-data request at all? "
+    "High = yes; a low answer is a computed reject.",
+    D2: "Specification sufficient: could a priced ticket be produced without guessing "
+    "dataset, schema, symbols, or timeframe? High = specific enough; below its cut "
+    "the door asks a clarifying question.",
+    D3: "Dataset fit: how well the request maps to a specific Databento dataset/schema, "
+    "from none < plausible < close < exact. Below 'close' the door asks a clarifying question.",
+    D5: "Cost proportionate: is the estimated spend proportionate to the stated intent? "
+    "Low = disproportionate, so the door asks a clarifying question.",
+}
+
+
+def question_legend(code: str) -> str:
+    """Plain-English description of a question code, or the code itself if unknown."""
+    return QUESTION_LEGEND.get(code, code)
+
 
 class GateAction(StrEnum):
     """What the front desk should do. The gate's output, computed not asked."""

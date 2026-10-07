@@ -103,3 +103,12 @@ def test_a_grade_without_a_request_id_is_a_bad_request(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch, [])
     response = TestClient(create_app()).post("/api/grade", json={"verdict": "right"})
     assert response.status_code == 400
+
+
+def test_each_jev_answer_carries_a_plain_english_means(tmp_path, monkeypatch):
+    """A grader should not have to remember what `d2_specification_sufficient` means."""
+    _wire(tmp_path, monkeypatch, [_record("r1")])
+    _sample(tmp_path / "samples.jsonl", "r1")
+    entry = build_queue()[0]["jev"][0]
+    assert entry["means"].startswith("Specification sufficient")
+    assert "d2_specification_sufficient" not in entry["means"]

@@ -89,3 +89,12 @@ def test_the_cli_can_serve_streamable_http_for_a_hub(monkeypatch):
     monkeypatch.setattr(gate_grader.mcp, "run", lambda **kw: calls.append(kw))
     assert gate_grader.main(["--transport", "streamable-http", "--port", "9001"]) == 0
     assert calls == [{"transport": "streamable-http", "host": "0.0.0.0", "port": 9001, "stateless_http": True}]
+
+
+def test_the_legend_tool_spells_out_the_codes():
+    """`legend` answers 'what does D2 mean?' without a doc lookup."""
+    from agent.gate import D1, D2, D3, D5
+
+    legend = gate_grader.legend()
+    assert set(legend) == {D1, D2, D3, D5}
+    assert legend[D2].startswith("Specification sufficient")
