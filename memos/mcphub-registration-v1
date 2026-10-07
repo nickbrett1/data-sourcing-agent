@@ -1,0 +1,79 @@
+# Registering the grader MCP in mcphub (2026-10-07)
+
+Companion to `grading-surface-v1`. That memo built `agent/grademcp.py` as a stdio
+server. This records what the NAS side actually requires, and why stdio alone is not
+enough — findings from nas-goose, written to
+`/volumeUSB1/usbshare/docker/data-sourcing-agent/MCPHUB-GRADEMCP-REGISTRATION-20261006.md`.
+
+## mcphub cannot host a stdio server
+
+mcphub spawns `stdio` servers as **child processes inside its own container**
+(`serverConfigValidation.js`: "spawn `command`/`args` locally as the MCPHub
+process"; `mcpService.js` uses `new StdioClientTransport({command, args})`). It has
+**no docker CLI and no docker socket**, so it cannot `docker exec` into our
+container either. A `python -m agent.grademcp` stdio entry would run where the
+`agent` package and `/state` do not exist.
+
+So the grading MCP is exposed over **streamable-http** instead, and mcphub
+registers the **URL**. This is why `grademcp` grew `--transport streamable-http`
+(the server is identical; only the wire changes) and why compose gained a
+`grademcp` service on `ai_proxy` at port **8802** (no host port — only peers need
+it).
+
+## The registration, once the image is deployed
+
+mcphub's source of truth is **PostgreSQL**, not `mcp_settings.json` (that JSON is
+imported once on first start only) — so changes go through the **API**, and the
+live `data` group id is `2c646542-70e2-4f6f-9664-962885b20006` (the id in the JSON
+is stale). Auth: `POST /api/auth/login` → token, then header `x-auth-token`.
+
+```bash
+cd /volumeUSB1/usbshare/docker/mcphub
+set -a; . ./..env; set +a
+DATA_GROUP=2c646542-70e2-4f6f-9664-962885b20006
+TOK=$(curl -s -X POST http://localhost:8781/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"admin\",\"password\":\"$MCPHUB_ADMIN_PASSWORD\"}" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+
+# 1) create the server
+curl -s -X POST http://localhost:8781/api/servers \
+  -H "x-auth-token: $TOK" -H 'Content-Type: application/json' \
+  -d '{"name":"grademcp","config":{
+        "type":"streamable-http",
+        "url":"http://data-sourcing-agent-grademcp:8802/mcp",
+        "description":"Gate grading: next_request, queue, record_grade, status, grades",
+        "enabled":true,"owner":"admin"}}'
+
+# 2) add it to the live 'data' group
+curl -s -X POST http://localhost:8781/api/groups/$DATA_GROUP/servers \
+  -H "x-auth-token: $TOK" -H 'Content-Type: application/json' \
+  -d '{"serverName":"grademcp"}'
+```
+
+Group entry: `{"name":"grademcp","tools":"all","prompts":"all","resources":"all"}`.
+Rollback: `DELETE /api/groups/$DATA_GROUP/servers/grademcp` then
+`DELETE /api/servers/grademcp`.
+
+## How it rolled out (done, 2026-10-07)
+
+The image publish step (`.buildkite/pipeline.yml`) is `if: build.branch == "main"`,
+so the deployed NAS image (`main`, revision `9ad505f`) had **no `grademcp.py` or
+`grader.py`** — those lived only on `feat/jev-gate`. The sequence that landed it:
+
+1. **Merged PR #13** (`feat/jev-gate` → `main`, merge commit `aefaa5ae`). Buildkite
+   build #42 passed and published `:latest` and `:aefaa5ae` to GHCR.
+2. **Synced the NAS compose**
+   (`/volumeUSB1/usbshare/docker/data-sourcing-agent/compose.yaml`, formerly `app`
+   only) with the repo's `grader` + `grademcp` services (backup kept as
+   `compose.yaml.bak-pr13-20261006-225544`), then `docker compose up -d`.
+3. **Registered** as above.
+
+Verified state: image `:latest` = `:aefaa5ae` = `8a685596dbc1`; container
+`data-sourcing-agent-grademcp` **running/healthy** on `ai_proxy` (`172.21.0.37`);
+`POST http://data-sourcing-agent-grademcp:8802/mcp` from the mcphub container →
+**HTTP 200**; `GET /api/servers/grademcp` → `status: connected` (tools
+`next_request`, `queue`, `record_grade`, `status`, `grades`); the `data` group is
+now `[databento-discovery, memos, grademcp]`. `GATE_ENFORCE` is still blank, so the
+gate deployed observe-only — as intended. Rollout log:
+`/volumeUSB1/usbshare/docker/data-sourcing-agent/ROLLOUT-PROGRESS-20261006.md`.
