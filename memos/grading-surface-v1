@@ -12,7 +12,7 @@ underlying functions and cannot drift:
 |---|---|---|
 | a person | the page at `/` | `agent.grader.build_queue` |
 | Homepage / Dagu | `GET /api/summary` | `agent.summary.build_summary` |
-| an agent | MCP tools (stdio) | `agent.grademcp` — same functions |
+| an agent | MCP tools (stdio) | `agent.gate_grader` — same functions |
 
 ## The read surface: `agent/summary.py`
 
@@ -27,7 +27,7 @@ One payload answering three questions, because they are what "out of sync" means
 `python -m agent.summary [--json|--check]`. `--check` exits non-zero on drift, so
 Dagu's ordinary failure notification is the alert and no alerting logic lives here.
 
-## The MCP: `agent/grademcp.py`
+## The MCP: `agent/gate_grader.py`
 
 Stdio, not an HTTP port — deliberately. The thing it grades is local, and a stdio
 server inherits the caller's filesystem rather than needing its own exposure
