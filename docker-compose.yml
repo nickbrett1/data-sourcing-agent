@@ -71,6 +71,36 @@ services:
       - "homepage.widget.mappings[0].label=Status"
     networks:
       - ai_proxy
+
+  # The grading service: the UI plus the read surface (`/api/summary`) that
+  # Homepage and the Dagu job (deploy/dagu/gate-drift.yaml) consume. Same image,
+  # different entrypoint, same state volume. Published on the LAN (0.0.0.0) by
+  # decision (2026-10-07): there is NO AUTH, so it is read-only over the logs plus
+  # grade writes — treat it as a trusted-LAN tool, not an internet-facing one.
+  grader:
+    image: ghcr.io/nickbrett1/data-sourcing-agent:latest
+    container_name: data-sourcing-agent-grader
+    restart: unless-stopped
+    command: ["python", "-m", "agent.grader", "--host", "0.0.0.0", "--port", "8801"]
+    ports:
+      - "0.0.0.0:8801:8801"
+    environment:
+      AGENT_STATE_DIR: ${AGENT_STATE_DIR:-/state}
+    volumes:
+      - ${AGENT_STATE_HOST_DIR:-./state}:/state
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "homepage.group=Services"
+      - "homepage.name=gate grader"
+      - "homepage.href=http://nas:8801/"
+      - "homepage.widget.type=customapi"
+      - "homepage.widget.url=http://nas:8801/api/summary"
+      - "homepage.widget.mappings[0].field=status"
+      - "homepage.widget.mappings[0].label=Status"
+      - "homepage.widget.mappings[1].field=issue"
+      - "homepage.widget.mappings[1].label=Sync"
+    networks:
+      - ai_proxy
 networks:
   ai_proxy:
     external: true

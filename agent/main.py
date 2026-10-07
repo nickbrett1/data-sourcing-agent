@@ -308,7 +308,6 @@ class TicketAgentExecutor(AgentExecutor):
 
     def _label(self, request_id: str | None, outcome: Outcome, *, note: str | None = None) -> None:
         """Append the delayed label for this turn — best-effort, like the gate itself.
-
         The agent can only honestly label the two outcomes it observes: a ticket was
         drafted, or the turn failed. `approved`/`rejected`/`reran` come later from
         outside. None of it may break a turn (§4's fail-open, applied to logging).
@@ -319,6 +318,21 @@ class TicketAgentExecutor(AgentExecutor):
             append_label(request_id, outcome, source="agent", note=note)
         except Exception as exc:  # a label that cannot be written must not fail a turn
             print(f"[label] skipped: {exc!r}", flush=True)
+
+    async def _shadow_sample(self, user_input: str, intent: ParsedIntent | None, request_id: str) -> None:
+        """Generate and log the ticket a stopped request would have produced.
+
+        The door stops the turn; it must not stop the *evidence*. A stopped request
+        is exactly the one a human most wants to grade, and generating a draft spends
+        nothing (§grading-sample-v1). Best-effort: a failure here is logged, never
+        raised — the turn is already being stopped on purpose.
+        """
+        try:
+            prompt = ticket_prompt(user_input, intent) if intent is not None else user_input
+            result = await self._agent.run(prompt)
+            append_sample(request_id, user_input, render_ticket_yaml(result.output))
+        except Exception as exc:
+            print(f"[sample] shadow generation skipped: {exc!r}", flush=True)
 
     def _log_gate(
         self,
@@ -398,11 +412,17 @@ class TicketAgentExecutor(AgentExecutor):
             stopped = _enforced_reply(outcome)
             if stopped is not None:
                 self._label(request_id, Outcome.door_stopped)
+                # Keep the artifact even though the turn stops: a stopped request is
+                # exactly the one to grade, and generating a draft spends nothing
+                # (memo grading-sample-v1). Best-effort — the door's job is to stop
+                # the turn, not to fail it.
+                await self._shadow_sample(user_input, intent, request_id)
                 await updater.complete(updater.new_agent_message([new_text_part(stopped)]))
                 return
             prompt = ticket_prompt(user_input, intent) if intent is not None else user_input
             result = await self._agent.run(prompt)
             ticket = result.output
+            rendered = render_ticket_yaml(ticket)
             # The post-price checkpoint: D5 could not be asked at the front door
             # (no estimate yet). Now that the Validator has priced the request, it
             # can be — observe-only, same request id.
@@ -410,9 +430,10 @@ class TicketAgentExecutor(AgentExecutor):
             stopped = _enforced_reply(cost_outcome)
             if stopped is not None:
                 self._label(request_id, Outcome.door_stopped)
+                # The ticket already exists here — keep it without regenerating.
+                append_sample(request_id, user_input, rendered)
                 await updater.complete(updater.new_agent_message([new_text_part(stopped)]))
                 return
-            rendered = render_ticket_yaml(ticket)
         except Exception as exc:  # a failed turn is a failed task, not a crash
             self._label(request_id, Outcome.run_failed, note=str(exc)[:200])
             await updater.failed(

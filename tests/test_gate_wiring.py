@@ -20,6 +20,7 @@ from agent import main
 from agent.gate import D1, D2, D3, D5, GateAction, GatePolicy
 from agent.interpret import ParsedIntent
 from agent.jev import NoulAnswer, ScoreAnswer
+from agent.samples import load_samples
 from agent.ticket import (
     CostProposal,
     RequestSpec,
@@ -237,3 +238,36 @@ def test_flipping_enforce_is_the_only_thing_that_changes_a_turn(tmp_path, monkey
     rows = [json.loads(line) for line in (tmp_path / "gate-log.jsonl").read_text().splitlines()]
     holdback_rows = [r for r in rows if r["holdback"]]
     assert holdback_rows and all(r["action_computed"] == "reject" for r in holdback_rows)
+
+
+class _FakeAgent:
+    """A pydantic-agent stand-in: returns a Ticket, or raises, on demand."""
+
+    def __init__(self, ticket=None, boom=False):
+        self._ticket, self._boom = ticket, boom
+
+    async def run(self, _prompt):
+        if self._boom:
+            raise RuntimeError("model down")
+        return type("R", (), {"output": self._ticket})()
+
+
+def test_a_stopped_turn_still_keeps_the_artifact_it_would_have_made(tmp_path, monkeypatch):
+    """The door stops the turn; it must not stop the evidence (§grading-sample-v1)."""
+    monkeypatch.setenv("GATE_SAMPLE_PATH", str(tmp_path / "samples.jsonl"))
+    ex = _executor(_Interpreter(), _Jev())
+    ex._agent = _FakeAgent(_ticket(1.0))
+    asyncio.run(ex._shadow_sample("one day of SPY options", None, "rid-shadow"))
+    samples = load_samples(tmp_path / "samples.jsonl")
+    assert samples["rid-shadow"].text == "one day of SPY options"
+    assert samples["rid-shadow"].ticket.startswith("state:")
+
+
+def test_a_shadow_generation_failure_never_raises(tmp_path, monkeypatch):
+    """Best-effort: the turn is already being stopped on purpose; a sample failure
+    must not become a failure of the turn."""
+    monkeypatch.setenv("GATE_SAMPLE_PATH", str(tmp_path / "samples.jsonl"))
+    ex = _executor(_Interpreter(), _Jev())
+    ex._agent = _FakeAgent(boom=True)
+    asyncio.run(ex._shadow_sample("text", None, "rid-x"))  # must not raise
+    assert load_samples(tmp_path / "samples.jsonl") == {}
