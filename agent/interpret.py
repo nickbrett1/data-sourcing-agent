@@ -170,12 +170,22 @@ def build_interpreter(model, toolsets=None):
     Built here rather than in `main.py` so the interpretation contract (a typed,
     gap-honest `ParsedIntent`) lives with its tests. `model` is injected — the
     same gateway model the ticket run uses.
+
+    `PromptedOutput`, NOT the default `ToolOutput`: `deepseek-v4-flash` is a
+    thinking model and refuses a forced `tool_choice` ("Thinking mode does not
+    support this tool_choice"), so the default tool-output parser 400s on every
+    call and the front-door gate never runs. Same fix, same reason as the ticket
+    `agent` in `main.py`; `NativeOutput` fails too — do not "upgrade" without
+    re-testing. Reasoning tokens bill against `max_tokens`, so the default cap
+    truncates the JSON; raise it.
     """
-    from pydantic_ai import Agent
+    from pydantic_ai import Agent, ModelSettings, PromptedOutput
 
     return Agent(
         model,
         instructions=INTERPRETER_INSTRUCTIONS,
-        output_type=ParsedIntent,
+        output_type=PromptedOutput(ParsedIntent),
+        model_settings=ModelSettings(max_tokens=4096),
+        retries={"output": 3},
         toolsets=toolsets or [],
     )

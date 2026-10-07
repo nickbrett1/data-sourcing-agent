@@ -7,11 +7,33 @@ on. A silent fill-in is the failure the gate exists to catch.
 
 from __future__ import annotations
 
-from agent.interpret import AXES, ParsedIntent, ticket_prompt, to_gate_state
+from agent.interpret import (
+    AXES,
+    ParsedIntent,
+    build_interpreter,
+    ticket_prompt,
+    to_gate_state,
+)
 
 
 def test_axes_vocabulary_matches_d2():
     assert set(AXES) == {"dataset", "schema", "universe", "timeframe"}
+
+
+def test_the_interpreter_uses_prompted_output_not_the_tool_choice_parser():
+    """The gateway model is a thinking model and 400s on a forced `tool_choice`.
+
+    This regressed once live: the interpreter was left on the default `ToolOutput`
+    while the ticket agent was fixed, so every front-door gate call 400'd and the
+    gate silently failed open (`[interpret] skipped`). Pin the output mode so the
+    default cannot creep back.
+    """
+    from pydantic_ai import PromptedOutput
+    from pydantic_ai.models.test import TestModel
+
+    interpreter = build_interpreter(TestModel())
+    assert isinstance(interpreter.output_type, PromptedOutput)
+    assert interpreter.output_type.outputs is ParsedIntent
 
 
 def test_render_names_each_unresolved_axis():
