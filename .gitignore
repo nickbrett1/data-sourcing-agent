@@ -45,4 +45,5 @@ dist/
 /gate-log.jsonl
 /gate-labels.jsonl
 /gate-cutoff.json
+/gate-samples.jsonl
 state/

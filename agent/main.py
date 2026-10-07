@@ -79,6 +79,7 @@ from agent.jev import JevClient
 from agent.model import build_model
 from agent.register import register_with_litellm
 from agent.roost import RoostBridge
+from agent.samples import append_sample
 from agent.ticket import TicketProposal, render_ticket_yaml
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -422,6 +423,11 @@ class TicketAgentExecutor(AgentExecutor):
             self._roost.turn_finished()
             await self._roost.emit("finished", taskId=context.task_id)
         await updater.add_artifact([new_text_part(rendered)], name="ticket")
+        # The evidence a human grades: the text that came in and the ticket the
+        # agent made of it, joined to the gate log by `request_id`. Without this a
+        # stopped request has no artifact to judge — "Jev said stop" is not, alone,
+        # right or wrong (agent/samples.py). Drafts spend nothing, so this is free.
+        append_sample(request_id, user_input, rendered)
         # The only label the agent can write with certainty: a ticket exists. Whether
         # it was any good is a human's call, logged later from outside (§6.5.1).
         self._label(request_id, Outcome.drafted)
