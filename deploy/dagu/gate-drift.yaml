@@ -8,8 +8,12 @@
 # Requires the grader service to be reachable from wherever Dagu runs. Configure
 # the failure handler for your notifier (email/slack/webhook) — left to the
 # deployment, since Dagu's sink is environment-specific.
+#
+# Companion: gate-refresh.yaml runs half an hour earlier and re-freezes the cutoff
+# when the bucket has filled, so an alert from here about a due re-freeze has
+# already had its chance to be satisfied by the time this fires.
 
-schedule: "0 9 * * *"   # daily, an hour after the intended cutoff re-freeze
+schedule: "0 9 * * *"   # daily, half an hour after the re-freeze job
 timezone: UTC
 
 steps:

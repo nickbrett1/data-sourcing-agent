@@ -1,0 +1,66 @@
+# The cutoff watermark — re-freeze on material, not on the clock (2026-10-07)
+
+Companion to `rolling-cutoff-start-v1`. That memo froze the *value* and its knobs.
+This one records *when* to freeze again — the piece the drift-check alert was
+missing. "An alarm with no fire brigade": `agent.summary --check` could say the cut
+was stale, but nothing re-froze it, and "stale" was measured in hours.
+
+## The problem with time
+
+A frozen cut is still the right number while **nothing new has arrived**. A daily
+re-freeze over an unchanged log recomputes the same boundary and produces nothing —
+and, worse, a cut that is old *only* because the agent was quiet gets flagged as if
+something were wrong. Time is a proxy that cries wolf.
+
+What actually justifies a new freeze is **material**: entries that have been graded
+since the last freeze, plus entries that could be graded. The scarce act is the
+human grade, so the trigger keys on it.
+
+## The bucket / watermark model
+
+A freeze now records a **watermark**: how many graded entries existed when it was
+written (`Cutoff.watermark`). Grades are append-only and latest-wins per
+`request_id`, so that count only ever grows and a single integer is a faithful
+watermark — no need to store the id set.
+
+```
+unused_graded = graded - watermark        # graded since the last freeze
+ungraded      = samples - graded          # no verdict yet
+actionable    = unused_graded + ungraded  # what the next freeze could work with
+```
+
+**Alert when `actionable >= bucket_size`** (`summary.BUCKET_SIZE`, start 20). The
+alert is always *satisfiable*: grading the ungraded slab turns it into
+`unused_graded`, which then fills the bucket and justifies the freeze. So "the door
+is out of sync" always names work a person can actually do.
+
+The bucket is **tunable by how wrong the reviews find Jev** — rarely wrong, extend
+it (freeze less often); wrong often, shrink it.
+
+## What acts on the alert
+
+A second Dagu job, `deploy/dagu/gate-refresh.yaml`, runs
+`python -m agent.cutoff --if-due` daily, half an hour before the drift check.
+
+`--if-due` is the whole point. An *unconditional* daily freeze would bump the
+watermark every day, reset `unused_graded` to zero, and silence the very signal it
+exists to answer. So the job asks `summary` first: the **decision** lives in
+`summary`, the **action** in `refresh`.
+
+`refreeze_due` is deliberately narrower than the alert:
+
+* **unarmed cutoff** → due once the log holds `DEFAULT_MIN_N` scores (the *first*
+  freeze is driven by the log, not the grades — it replaces the provisional 0.91).
+* **armed cutoff** → due only when `unused_graded > 0` **and** (bucket full or the
+  week-long backstop is overdue). A freeze consumes *grades*; with none unused
+  there is nothing to consume, so a full bucket made only of ungraded entries reads
+  as **"grading due"**, not "re-freeze due".
+
+Time survives only as `BACKSTOP_HOURS` (a week): it fires when the cut is old *and*
+there are unconsumed grades. Time alone never triggers.
+
+## Surfaces
+
+`build_summary` gains `watermark`, `unused_graded`, `actionable`, `bucket_size`,
+`scores`, and `refreeze_due`; every consumer (Homepage widget, MCP `status()`,
+`/api/summary`, Dagu) reads them from the one payload, unchanged.

@@ -3,14 +3,17 @@
 Three questions, one payload — because Homepage, Dagu, and an agent all want the
 same answer, and none of them should re-derive it:
 
-* **Is the cut fresh?** The enforced D2 cut is frozen from a window of scores and
-  re-frozen on a cadence. A cut older than that window is enforcing a number the
-  log no longer supports.
+* **Is the cut fresh?** A freeze consumes the graded entries it has seen. The
+  question is not "how long ago" but "is there enough new material to make a new
+  freeze worth doing" — `actionable = unused_graded + ungraded`. Alert when that
+  reaches the bucket. A frozen cut is still correct while nothing new has arrived,
+  so time is only a long backstop, never the trigger.
 * **Do the grades agree with the cut?** If the door is `too_strict` far more often
   than `too_lenient`, the cut is wrong *in a direction* — and that is the signal to
   move it, not a number to discover.
-* **Is grading keeping up?** An ungraded backlog means the second answer is stale
-  even when the first is fresh.
+* **Is grading keeping up?** The ungraded slab is part of `actionable`: grading it
+  is exactly what fills the next bucket, so the alert is always satisfiable by work
+  a human can actually do.
 
 This is a *status*, not a metric series: it is computed on demand from the streams
 that already exist. That keeps it cheap and keeps the cardinality rule intact
@@ -28,7 +31,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from agent.cutoff import Cutoff
+from agent.cutoff import DEFAULT_MIN_N, Cutoff, logged_scores
 from agent.cutoff import read as read_cutoff
 from agent.grades import Grade, Verdict, load_grades
 from agent.samples import Sample, load_samples
@@ -39,9 +42,8 @@ from agent.samples import Sample, load_samples
 MIN_GRADES = 20  # below this the grades cannot say anything; not a warning
 MISMATCH_MARGIN = 5  # and at least this many one way...
 MISMATCH_FRACTION = 0.20  # ...and this share of the graded set
-CUT_STALE_HOURS = 26.0  # a daily re-freeze leaves a day of slack
-BACKLOG_FRACTION = 0.50  # more than half ungraded...
-BACKLOG_MIN = 20  # ...and at least this many, is a backlog
+BUCKET_SIZE = 20  # enough new material to make a re-freeze worth doing
+BACKSTOP_HOURS = 168.0  # a week — time alone never triggers; only time *with* material
 
 
 def _cut_age_hours(cut: Cutoff | None, now: datetime) -> float | None:
@@ -61,6 +63,7 @@ def build_summary(
     grades: Mapping[str, Grade] | None = None,
     samples: Mapping[str, Sample] | None = None,
     cut: Cutoff | None = None,
+    scores: Sequence[float] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """The status payload. Every input injectable so the logic is testable alone."""
@@ -68,11 +71,20 @@ def build_summary(
     grades = load_grades() if grades is None else grades
     samples = load_samples() if samples is None else samples
     cut = read_cutoff() if cut is None else cut
+    scores = logged_scores() if scores is None else scores
 
     graded = len(grades)
     total = len(samples)
     ungraded = max(0, total - graded)
     coverage = graded / total if total else 0.0
+
+    # The bucket: what a freeze has not yet consumed. A freeze records how many
+    # grades it had seen (`watermark`); anything graded since is *unused*, and the
+    # ungraded slab is material a person could still convert. Their sum is what the
+    # next freeze would have to work with.
+    watermark = cut.watermark if cut else 0
+    unused_graded = max(0, graded - watermark)
+    actionable = unused_graded + ungraded
 
     counts = {v: 0 for v in Verdict}
     for grade in grades.values():
@@ -83,12 +95,41 @@ def build_summary(
     if graded < MIN_GRADES:
         issues.append(f"only {graded} graded; need {MIN_GRADES} before the grades speak")
 
-    # (1) the cut is older than its refresh cadence.
+    # (1) the bucket is full — there is a bucket's worth of material to work with.
+    # It is always *satisfiable*: anything ungraded can be graded, and grading is
+    # what fills the next freeze.
     age = _cut_age_hours(cut, now)
-    if cut is None or not cut.armed:
+    bucket_full = actionable >= BUCKET_SIZE
+    # A thin trickle can stay under the bucket for a long time. Time alone is not a
+    # reason (a quiet period needs no new number), but time *plus* grades nobody has
+    # frozen on yet is.
+    overdue = age is not None and age > BACKSTOP_HOURS and unused_graded > 0
+    unarmed = cut is None or not cut.armed
+    # The first freeze is driven by the log, not the grades: it replaces the
+    # provisional cut with the measured one as soon as a window's worth of scores
+    # exists. Later freezes consume *grades* — with none unused there is nothing to
+    # freeze — so the scheduler action is narrower than the alert: warn on the sum,
+    # act only when there is a graded entry it would actually consume.
+    if unarmed:
+        refreeze_due = len(scores) >= DEFAULT_MIN_N
+    else:
+        refreeze_due = unused_graded > 0 and (bucket_full or overdue)
+
+    if unarmed:
         issues.append("no armed cutoff; enforcing the provisional probability cut")
-    elif age is not None and age > CUT_STALE_HOURS:
-        issues.append(f"cut is {age:.0f}h old (window {CUT_STALE_HOURS:.0f}h); re-freeze due")
+    elif bucket_full:
+        if unused_graded >= BUCKET_SIZE:
+            issues.append(
+                f"re-freeze due: {unused_graded} graded since the last freeze "
+                f"(+{ungraded} ungraded) >= bucket {BUCKET_SIZE}"
+            )
+        else:
+            issues.append(
+                f"grading due: {ungraded} ungraded + {unused_graded} unused "
+                f">= bucket {BUCKET_SIZE}; grade them to fill the next freeze"
+            )
+    elif overdue:
+        issues.append(f"re-freeze overdue: cut is {age:.0f}h old with {unused_graded} graded unconsumed")
 
     # (2) the grades name a direction the cut has not moved in.
     imbalance = abs(strict - lenient)
@@ -96,23 +137,25 @@ def build_summary(
         way = "lower" if strict > lenient else "raise"
         issues.append(f"grades say {way} the cut ({strict} too_strict vs {lenient} too_lenient)")
 
-    # (3) grading is behind, so (2) is stale even if the count looks decisive.
-    if ungraded >= BACKLOG_MIN and coverage < (1 - BACKLOG_FRACTION):
-        issues.append(f"grading backlog: {ungraded} of {total} ungraded ({coverage:.0%} done)")
-
     return {
         "status": "ok" if not issues else "warn",
         "graded": graded,
         "total": total,
         "ungraded": ungraded,
         "coverage_pct": round(coverage * 100, 1),
+        "watermark": watermark,
+        "unused_graded": unused_graded,
+        "actionable": actionable,
+        "bucket_size": BUCKET_SIZE,
         "right": counts[Verdict.right],
         "too_strict": strict,
         "too_lenient": lenient,
         "unclear": counts[Verdict.unclear],
+        "scores": len(scores),
         "cut_value": cut.value if cut else None,
         "cut_armed": bool(cut and cut.armed),
         "cut_age_hours": round(age, 1) if age is not None else None,
+        "refreeze_due": refreeze_due,
         "issues": issues,
         "issue": issues[0] if issues else "in sync",
     }

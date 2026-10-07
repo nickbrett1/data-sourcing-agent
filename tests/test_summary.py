@@ -26,9 +26,11 @@ def _grades(**counts: int) -> dict[str, Grade]:
     return grades
 
 
-def _cut(hours_old: float, *, armed: bool = True) -> Cutoff:
+def _cut(hours_old: float, *, armed: bool = True, watermark: int = 10**9) -> Cutoff:
+    # A large default watermark means "a freeze already consumed everything" — the
+    # in-sync baseline. Tests that want a due re-freeze set it explicitly.
     return Cutoff(
-        value=0.6, rate=0.1, window=200, n=120, armed=armed,
+        value=0.6, rate=0.1, window=200, n=120, armed=armed, watermark=watermark,
         computed_at=(NOW - timedelta(hours=hours_old)).isoformat(), reason="x",
     )
 
@@ -50,11 +52,45 @@ def test_too_few_grades_is_a_warning_not_a_verdict():
     assert "need 20" in summary["issue"]
 
 
-def test_a_stale_cut_asks_for_a_refreeze():
+def test_a_full_bucket_asks_for_a_refreeze():
+    """New grades unused by the last freeze fill the bucket and trigger a freeze."""
     summary = build_summary(
-        grades=_grades(right=30), samples=_samples(40), cut=_cut(72), now=NOW
+        grades=_grades(right=30), samples=_samples(30), cut=_cut(2, watermark=5), now=NOW
     )
     assert any("re-freeze due" in issue for issue in summary["issues"])
+    assert summary["unused_graded"] == 25
+    assert summary["actionable"] == 25
+
+
+def test_the_ungraded_slab_counts_toward_the_bucket():
+    """Grading the backlog is what fills the next bucket, so it is part of the sum."""
+    summary = build_summary(
+        grades=_grades(right=10), samples=_samples(60), cut=_cut(2, watermark=10), now=NOW
+    )
+    assert any("grading due" in issue for issue in summary["issues"])
+    assert summary["unused_graded"] == 0
+    assert summary["actionable"] == 50
+    # Nothing graded is unused, so there is nothing for a freeze to consume.
+    assert summary["refreeze_due"] is False
+
+
+def test_a_quiet_period_with_a_consumed_freeze_stays_in_sync():
+    """A frozen cut is still correct while nothing new has arrived — time alone is not a trigger."""
+    summary = build_summary(
+        grades=_grades(right=38), samples=_samples(38), cut=_cut(500, watermark=38), now=NOW
+    )
+    assert summary["actionable"] == 0
+    assert summary["status"] == "ok"
+
+
+def test_time_is_a_backstop_only_when_there_is_material():
+    summary = build_summary(
+        grades=_grades(right=30), samples=_samples(30), cut=_cut(200, watermark=20), now=NOW
+    )
+    assert summary["unused_graded"] == 10  # under the bucket...
+    assert summary["actionable"] == 10
+    assert any("re-freeze overdue" in issue for issue in summary["issues"])
+    assert summary["refreeze_due"] is True
 
 
 def test_no_armed_cut_is_called_out():
@@ -84,11 +120,12 @@ def test_a_small_imbalance_does_not_move_the_cut():
     assert not any("the cut" in issue for issue in summary["issues"])
 
 
-def test_a_grading_backlog_is_reported():
+def test_an_ungraded_backlog_reads_as_a_full_bucket():
+    """A big ungraded pile is the same signal: enough material for a re-freeze."""
     summary = build_summary(
-        grades=_grades(right=5), samples=_samples(200), cut=_cut(2), now=NOW
+        grades=_grades(right=5), samples=_samples(200), cut=_cut(2, watermark=5), now=NOW
     )
-    assert any("backlog" in issue for issue in summary["issues"])
+    assert any("grading due" in issue for issue in summary["issues"])
     assert summary["ungraded"] == 195
     assert summary["coverage_pct"] == 2.5
 

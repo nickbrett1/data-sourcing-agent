@@ -106,6 +106,23 @@ def test_refresh_over_a_full_window_arms(tmp_path):
     assert read(path).value == frozen.value
 
 
+def test_a_freeze_records_how_many_grades_it_consumed(tmp_path):
+    path = tmp_path / "gate-cutoff.json"
+    grades = {"a": object(), "b": object(), "c": object()}
+    frozen = cutoff.refresh([], path=path, grades=grades, now=NOW)
+    assert frozen.watermark == 3
+    assert read(path).watermark == 3
+
+
+def test_an_old_cutoff_file_without_a_watermark_reads_as_zero(tmp_path):
+    """A file written before the watermark existed consumes nothing — the safe default."""
+    import json
+
+    path = tmp_path / "gate-cutoff.json"
+    path.write_text(json.dumps({"value": 0.6, "armed": True}), encoding="utf-8")
+    assert read(path).watermark == 0
+
+
 # --- the switch ---------------------------------------------------------------
 
 
@@ -143,3 +160,29 @@ def test_the_cli_reports_what_it_froze(tmp_path, capsys, monkeypatch):
     assert cutoff.main(["--rate", "0.05"]) == 0
     out = capsys.readouterr().out
     assert "NOT armed" in out
+
+
+def test_if_due_does_nothing_when_the_bucket_is_not_full(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv(cutoff.DEFAULT_DIR_ENV, str(tmp_path))
+    assert cutoff.main(["--if-due"]) == 0
+    assert "no re-freeze due" in capsys.readouterr().out
+    # And it did not write a cutoff: an early freeze would bump the watermark.
+    assert not (tmp_path / "gate-cutoff.json").exists()
+
+
+def test_if_due_freezes_when_the_bucket_is_full(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv(cutoff.DEFAULT_DIR_ENV, str(tmp_path))
+    # A log worth arming over, and enough samples to fill the bucket.
+    from agent.gate import D2
+    from agent.gatelog import append_records
+    from agent.samples import append_sample
+
+    records = []
+    for i in range(60):
+        records.append(
+            {"request_id": f"r{i}", "question_id": D2, "answer": 0.5 + i / 1000, "failed": False}
+        )
+        append_sample(f"r{i}", "text", "ticket")
+    append_records(records)
+    assert cutoff.main(["--if-due"]) == 0
+    assert (tmp_path / "gate-cutoff.json").exists()

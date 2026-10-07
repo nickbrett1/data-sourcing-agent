@@ -7,11 +7,13 @@ gate cannot do per-request:
 
 * **compute** the boundary over a window of logged scores (`escalation_cutoff`),
 * **freeze** it, so every request in a period is judged against the same number,
-* **re-freeze** on a cadence — daily here — because the population moves.
+* **re-freeze** once enough *new graded entries* have accumulated — not on a
+  clock, because a frozen number is still correct while nothing new has arrived.
 
-This module keeps that number and its provenance (`rate`, `window`, `n`, when it
-was computed) in one small file. The gate then reads `d2_cut` from it and never
-has to know a rate exists.
+This module keeps that number and its provenance (`rate`, `window`, `n`, `watermark`,
+when it was computed) in one small file. The gate then reads `d2_cut` from it and
+never has to know a rate exists; `summary` reads `watermark` to decide when the
+next freeze is due.
 
 Arithmetic over the log. No model, no Jev, no network.
 """
@@ -78,6 +80,16 @@ class Cutoff:
     written down (so the report and the log can show it) but must not be used to
     route. `n` and `window` say what it was measured over; `computed_at` says when
     to distrust it.
+
+    `watermark` is how many *graded entries* this freeze consumed — the count of
+    verdicts that existed when it was written. It is the book-keeping that lets
+    `summary` ask the only question that matters for a re-freeze: has enough new
+    material arrived since this number was frozen? Grades are append-only and
+    latest-wins per `request_id`, so the count only ever grows and a single
+    integer is a faithful watermark (no need to store the id set). An old file
+    without the key reads back as 0 — "nothing consumed" — which is the safe
+    default: it makes the next `summary` call over-eager to re-freeze, never
+    under-eager.
     """
 
     value: float
@@ -85,6 +97,7 @@ class Cutoff:
     window: int = DEFAULT_WINDOW
     n: int = 0
     armed: bool = False
+    watermark: int = 0
     computed_at: str = ""
     reason: str = ""
 
@@ -177,19 +190,42 @@ def refresh(
     min_n: int = DEFAULT_MIN_N,
     path: Path | None = None,
     now: datetime | None = None,
+    grades: Mapping[str, object] | None = None,
 ) -> Cutoff:
     """Re-freeze the cutoff from the log. The daily cron's one call.
 
-    Reads the D2 scores, arms a cutoff over the trailing window, writes it, and
-    returns it. Safe to run before the log exists — it arms nothing and says so.
+    Reads the D2 scores, arms a cutoff over the trailing window, records how many
+    verdicts it has now consumed as the watermark, writes it, and returns it. Safe
+    to run before the log exists — it arms nothing and says so.
+
+    The two inputs are deliberately separate: the *value* is arithmetic over the
+    D2 scores (the population), while the *watermark* counts the grades (the human
+    work). A freeze with no grades is still a freeze; it just consumes nothing.
     """
     if records is None:
         from agent.gatelog import gate_log_path
 
         records = _read_jsonl(gate_log_path())
+    if grades is None:
+        from agent.grades import load_grades
+
+        grades = load_grades()
     frozen = arm(d2_scores(records), rate, window=window, min_n=min_n, now=now)
+    frozen = replace(frozen, watermark=len(grades))
     write(frozen, path)
     return frozen
+
+
+def logged_scores(path: Path | None = None) -> list[float]:
+    """The D2 scores currently in the log — what an `arm` would be computed over.
+
+    `summary` needs the count to know whether the *first* freeze can happen at all:
+    before the log holds a window's worth, a re-freeze has nothing to measure and
+    the provisional cut stands.
+    """
+    from agent.gatelog import gate_log_path
+
+    return d2_scores(_read_jsonl(path or gate_log_path()))
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -241,14 +277,33 @@ def resolve_policy(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """`python -m agent.cutoff [--rate N] [--window W] [--min-n K]` — re-freeze and print."""
+    """`python -m agent.cutoff [--rate N] [--window W] [--min-n K] [--if-due]` — re-freeze and print.
+
+    `--if-due` is what the scheduled job uses: re-freeze only when the status says
+    the bucket has filled. An unconditional daily re-freeze would bump the
+    watermark every day and reset `unused_graded` to zero, silencing the very alert
+    that is supposed to say "freeze now" — so the job asks `summary` first, keeping
+    the *decision* in one place (`summary`) and the *action* in another (`refresh`).
+    """
     import argparse
 
     parser = argparse.ArgumentParser(description="Re-freeze the rolling D2 cutoff from the gate log.")
     parser.add_argument("--rate", type=float, default=DEFAULT_RATE, help="fraction to escalate (default 0.10)")
     parser.add_argument("--window", type=int, default=DEFAULT_WINDOW, help="trailing scores to use")
     parser.add_argument("--min-n", type=int, default=DEFAULT_MIN_N, help="scores needed to arm")
+    parser.add_argument("--if-due", action="store_true", help="re-freeze only when the bucket is full")
     args = parser.parse_args(argv)
+
+    if args.if_due:
+        from agent.summary import build_summary  # lazy: summary imports this module
+
+        status = build_summary()
+        if not status["refreeze_due"]:
+            print(
+                f"no re-freeze due: {status['issue']} "
+                f"(actionable {status['actionable']}/{status['bucket_size']})"
+            )
+            return 0
 
     frozen = refresh(rate=args.rate, window=args.window, min_n=args.min_n)
     state = "armed" if frozen.armed else "NOT armed"
