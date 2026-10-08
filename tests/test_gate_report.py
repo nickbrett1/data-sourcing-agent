@@ -167,3 +167,14 @@ def test_the_render_shows_the_was_jev_wrong_view(tmp_path):
     out = render(summarise(records))
     assert "Was Jev wrong?" in out
     assert "false REJECT" in out
+
+
+def test_a_fractional_score_buckets_to_the_nearest_level(tmp_path):
+    """Score is an expected level; `int()` truncation would file 0.67 (nearest
+    `plausible`) and 2.4 (nearest `close`) a level too low."""
+    path = _log(tmp_path, _answers(d3=0.67), GateDecision(action=GateAction.ask_clarifying), request_id="a")
+    _log(tmp_path, _answers(d3=2.4), GateDecision(action=GateAction.proceed), request_id="b")
+    report = summarise(load_records(path))
+    assert report.questions[D3].levels["plausible"] == 1
+    assert report.questions[D3].levels["close"] == 1
+    assert report.questions[D3].levels["none"] == 0

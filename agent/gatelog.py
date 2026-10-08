@@ -28,13 +28,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import uuid
 from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agent.gate import D1, D2, D3, D5, GateDecision
+from agent.gate import D1, D2, D3, D3_CLOSE, D5, GateDecision
 from agent.jev import Answer, ChoiceAnswer, NoulAnswer
 
 LOG_ENV = "GATE_LOG_PATH"
@@ -144,6 +145,14 @@ def build_records(
     return records
 
 
+def _finite(value: object) -> object:
+    """Map non-finite floats to `None`: JSON has no NaN/Infinity, and a strict
+    reader (JS `JSON.parse`, a parquet importer) rejects a bare `NaN` token."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 def append_records(records: Iterable[dict], path: Path | None = None) -> int:
     """Append records as JSONL. Returns how many were written.
 
@@ -157,10 +166,21 @@ def append_records(records: Iterable[dict], path: Path | None = None) -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as handle:
         for row in rows:
-            handle.write(json.dumps(row, separators=(",", ":")) + "\n")
+            clean = {k: _finite(v) for k, v in row.items()}
+            # `allow_nan=False` is a guard, not the fix: `_finite` has already
+            # removed every non-finite float, so this only fires if a new one is
+            # introduced — a loud failure beats silently writing invalid JSON.
+            handle.write(json.dumps(clean, separators=(",", ":"), allow_nan=False) + "\n")
     return len(rows)
 
 
-def default_thresholds(d1: float, d2: float, d5: float) -> dict[str, float]:
-    """The cuts in force, recorded so a later reader knows what produced a call."""
-    return {D1: d1, D2: d2, D5: d5, D3: float("nan")}  # D3 is graded, not thresholded
+def default_thresholds(
+    d1: float, d2: float, d5: float, d3: int = D3_CLOSE
+) -> dict[str, float]:
+    """The cuts in force, recorded so a later reader knows what produced a call.
+
+    D3 *is* thresholded — `decide` requires its chosen level at least `close` — so
+    the log records that cut (`d3_min`, the `close` index) rather than a sentinel.
+    A level score is compared against this index, so the threshold is the index.
+    """
+    return {D1: d1, D2: d2, D3: float(d3), D5: d5}

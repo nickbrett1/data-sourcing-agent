@@ -376,7 +376,10 @@ class TicketAgentExecutor(AgentExecutor):
                 answers,
                 decision,
                 thresholds=default_thresholds(
-                    DEFAULT_POLICY.d1_cut, DEFAULT_POLICY.d2_cut, DEFAULT_POLICY.d5_cut
+                    DEFAULT_POLICY.d1_cut,
+                    DEFAULT_POLICY.d2_cut,
+                    DEFAULT_POLICY.d5_cut,
+                    DEFAULT_POLICY.d3_min,
                 ),
                 request_id=request_id,
                 action_taken=outcome.action.value if outcome is not None else None,

@@ -385,3 +385,15 @@ def test_every_question_has_a_grader_legend():
     assert question_legend(D2).startswith("Specification sufficient")
     assert "d2_specification_sufficient" not in question_legend(D2)
     assert question_legend("d9_unknown") == "d9_unknown"
+
+
+def test_d3_below_close_reports_the_expected_level_not_a_truncated_index():
+    """Jev's Score is a continuous expected level; the reason must not truncate it
+    (int(1.65) == 1 would print "plausible" while the call is "below close")."""
+    d = decide(
+        {D1: NoulAnswer(noul=0.99), D2: NoulAnswer(noul=0.99), D3: ScoreAnswer(score=1.65)}
+    )
+    assert d.action is GateAction.ask_clarifying
+    reason = next(r for r in d.reasons if D3 in r)
+    assert "1.65" in reason
+    assert "plausible" not in reason
