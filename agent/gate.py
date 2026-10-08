@@ -346,8 +346,15 @@ def decide(
         return GateDecision(action=GateAction.reject, reasons=tuple(reasons))
 
     if d3 is not None and d3.score is not None and d3.score < policy.d3_min:
-        level = D3_LEVELS[int(d3.score)]
-        reasons.append(f"{D3}={level} < required close: fit too uncertain.")
+        # Jev returns a Score as the *expected level* over `D3_LEVELS` (a continuous
+        # value in [0, 3]), not a discrete index — verify by the returned
+        # `probabilities`, whose cell-wise expectation equals `score`. So report the
+        # number, not `D3_LEVELS[int(score)]`, which truncates 1.65 to "plausible"
+        # and contradicts the "below close" call the comparison just made.
+        reasons.append(
+            f"{D3}={d3.score:.2f} (expected level) < required close={D3_CLOSE}: "
+            "fit too uncertain."
+        )
     if d2 is not None and d2.noul is not None and d2.noul < policy.d2_cut:
         reasons.append(
             f"{D2}={d2.noul:.2f} < {policy.d2_cut:.2f} (provisional cut): "

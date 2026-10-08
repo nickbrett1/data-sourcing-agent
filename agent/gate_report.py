@@ -128,8 +128,15 @@ def _question_stats(records: list[dict]) -> dict[str, QuestionStats]:
         if qid == D3:
             answer = record.get("answer")
             if answer is not None:
-                index = int(answer)
-                stat.values.append(float(index))
+                # Jev's Score is the *expected level* — a continuous value in
+                # [0, len-1], not an index. Keep the exact value for the
+                # distribution and bucket by the nearest level (round, not
+                # truncate: `int(0.67) == 0` would file a near-`plausible` answer
+                # under `none`). Clamp, so a stray out-of-range score is still
+                # counted rather than dropped under a string key.
+                expected = float(answer)
+                stat.values.append(expected)
+                index = round(expected)
                 stat.levels[D3_LEVELS[index] if 0 <= index < len(D3_LEVELS) else str(index)] += 1
         else:
             probability = record.get("probability")

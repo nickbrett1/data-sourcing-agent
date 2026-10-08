@@ -90,7 +90,11 @@ class Score(BaseModel):
     type: Literal["score"] = "score"
     instructions: str = Field(description="What is being rated.")
     criteria: list[str] = Field(
-        description="Ordered levels, lowest first; the index is the score."
+        description=(
+            "Ordered levels, lowest first. Jev answers with the level's *expected "
+            "value* over these levels (a continuous score in [0, len-1]) plus the "
+            "full distribution, not a bare integer index — see `ScoreAnswer.score`."
+        )
     )
 
 
@@ -117,7 +121,14 @@ class ChoiceAnswer(BaseModel):
 
 
 class ScoreAnswer(BaseModel):
-    """The chosen level (its index), the legend it was chosen against, the spread."""
+    """The rated level, the legend it was rated against, and the spread.
+
+    `score` is the **expected level** over `criteria` — a continuous value in
+    `[0, len(criteria) - 1]`, equal to the cell-wise expectation of
+    `probabilities` — not a discrete index into the levels. A caller that wants a
+    single level should read `probabilities` (e.g. its mode or median), not
+    `int(score)`, which truncates and mislabels.
+    """
 
     score: float | None = None
     legend: dict[int, str] = Field(default_factory=dict)
