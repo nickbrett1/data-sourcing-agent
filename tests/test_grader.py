@@ -157,3 +157,16 @@ def test_the_page_explains_which_answer_breached_its_cut(tmp_path, monkeypatch):
     # The breach is computed from answer < threshold in the page, not left to the eye.
     assert "a.answer < a.threshold" in page
     assert "class=\"breach\"" in page
+
+
+def test_a_legacy_nan_answer_does_not_500_the_queue(tmp_path, monkeypatch):
+    """An old log row can carry a bare `NaN` token, which Python reads back as a
+    non-finite float. Starlette's JSONResponse (allow_nan=False) rejects that, so
+    one bad legacy row would 500 the whole endpoint — the reader must normalise."""
+    _wire(tmp_path, monkeypatch, [])
+    log = tmp_path / "gate-log.jsonl"
+    log.write_text(json.dumps(_record("r1", answer=float("nan"))) + "\n", encoding="utf-8")
+    _sample(tmp_path / "samples.jsonl", "r1")
+    response = TestClient(create_app()).get("/api/queue")
+    assert response.status_code == 200
+    assert response.json()[0]["jev"][0]["answer"] is None

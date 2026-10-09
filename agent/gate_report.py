@@ -51,7 +51,7 @@ from agent.gate import (
     escalation_cutoff,
 )
 from agent.gatelabels import apply_labels, load_labels
-from agent.gatelog import gate_log_path
+from agent.gatelog import finite_row, gate_log_path
 from agent.grades import Grade, Verdict, advice, load_grades
 from agent.grades import tally as grade_tally
 
@@ -79,7 +79,7 @@ def load_records(path: Path | None = None) -> list[dict]:
             if not line:
                 continue
             try:
-                records.append(json.loads(line))
+                records.append(finite_row(json.loads(line)))
             except json.JSONDecodeError:
                 continue
     return records

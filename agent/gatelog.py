@@ -153,6 +153,27 @@ def _finite(value: object) -> object:
     return value
 
 
+def finite_row(row: dict) -> dict:
+    """A record with every non-finite float (top-level or nested) replaced by None.
+
+    `append_records` guards *new* writes, but a log written before that guard can
+    carry a bare `NaN`/`Infinity` token — which Python's `json.loads` accepts and
+    a strict reader (Starlette's `JSONResponse`, JS `JSON.parse`, parquet) rejects.
+    Readers normalise through here so a legacy row cannot 500 a whole endpoint.
+    """
+
+    def clean(value: object) -> object:
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, dict):
+            return {k: clean(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [clean(v) for v in value]
+        return value
+
+    return {k: clean(v) for k, v in row.items()}
+
+
 def append_records(records: Iterable[dict], path: Path | None = None) -> int:
     """Append records as JSONL. Returns how many were written.
 
