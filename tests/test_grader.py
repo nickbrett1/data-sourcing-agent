@@ -102,6 +102,9 @@ def test_the_page_is_mobile_ready_and_coerces_a_numeric_answer(tmp_path, monkeyp
     # content -- a fixed footer covered the last lines of the ticket on a phone.
     assert "position: fixed" not in page
     assert "flex-direction: column" in page
+    # The verdicts are explained on screen, so `unclear` does not read as a riddle.
+    assert 'id="legend"' in page
+    assert "doesn't settle it" in page
 
 
 def test_posting_a_grade_writes_it(tmp_path, monkeypatch):
