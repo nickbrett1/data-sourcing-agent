@@ -159,6 +159,20 @@ def test_the_page_explains_which_answer_breached_its_cut(tmp_path, monkeypatch):
     assert "class=\"breach\"" in page
 
 
+def test_grading_the_last_item_is_not_a_dead_stop(tmp_path, monkeypatch):
+    """Grading the end of the queue must not leave the screen frozen: the page
+    wraps to any still-ungraded item and shows an explicit all-graded state, and
+    re-tapping an unchanged verdict is a no-op rather than a duplicate write."""
+    _wire(tmp_path, monkeypatch, [])
+    _sample(tmp_path / "samples.jsonl", "r1")
+    page = TestClient(create_app()).get("/").text
+    assert "queue.findIndex((x, j) => j > i && !x.grade)" in page      # forward
+    assert "const anywhere = queue.findIndex(x => !x.grade)" in page   # then wrap
+    assert "all ${queue.length} graded · nothing left" in page         # explicit done
+    assert "your verdict:" in page                                     # visible feedback
+    assert "q.grade === v" in page                                     # no duplicate writes
+
+
 def test_a_legacy_nan_answer_does_not_500_the_queue(tmp_path, monkeypatch):
     """An old log row can carry a bare `NaN` token, which Python reads back as a
     non-finite float. Starlette's JSONResponse (allow_nan=False) rejects that, so

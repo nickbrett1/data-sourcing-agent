@@ -59,6 +59,8 @@ PAGE = """<!doctype html>
   .breach { color: #e7d06e; }
   .breach .cut { color: #a89a5e; }
   .why { color: #e7d06e; margin-top: 6px; }
+  .verdict { margin-top: 10px; color: #7d8896; }
+  .verdict b { color: #6ee7a8; }
   .door { display: inline-block; padding: 2px 10px; border-radius: 3px; font-weight: 700; }
   .door.proceed { background: #1d3a2a; color: #6ee7a8; }
   .door.ask_clarifying { background: #3a3320; color: #e7d06e; }
@@ -143,7 +145,10 @@ async function load() {
 }
 function render() {
   const graded = queue.filter(q => q.grade).length;
-  document.getElementById('count').textContent = `${i + 1} / ${queue.length} · ${graded} graded`;
+  const done = queue.length > 0 && graded === queue.length;
+  document.getElementById('count').textContent = done
+      ? `all ${queue.length} graded · nothing left`
+      : `${i + 1} / ${queue.length} · ${graded} graded`;
   document.getElementById('fill').style.width = queue.length ? (graded / queue.length * 100) + '%' : '0';
   const q = queue[i];
   const main = document.getElementById('main');
@@ -170,22 +175,35 @@ function render() {
       <h2>Jev</h2><div class="jev">${jev}</div>
       <h2>Door said</h2><div><span class="door ${esc(q.door)}">${esc(q.door)}</span>${held}</div>
       ${why ? `<div class="why">why: ${why}</div>` : ''}
+      <div class="verdict">your verdict: <b>${q.grade ? esc(q.grade) : 'not graded yet'}</b>${done ? ' · all done' : ''}</div>
     </section>
     <section>
       <h2>Ticket</h2><pre>${esc(q.ticket)}</pre>
     </section>`;
   document.getElementById('note').value = q.note || '';
-  document.getElementById('count').textContent += q.grade ? ` · graded: ${q.grade}` : '';
 }
 async function grade(v) {
   const q = queue[i]; if (!q) return;
   const note = document.getElementById('note').value;
-  await fetch('/api/grade', { method: 'POST',
+  // Re-tapping the same verdict on an already-graded item is a no-op: skip the
+  // write (no duplicate history rows), just move on.
+  if (q.grade === v && (q.note || '') === note) { advance(); return; }
+  const res = await fetch('/api/grade', { method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ request_id: q.request_id, verdict: v, note }) });
+  if (!res.ok) { alert('Could not save the grade (HTTP ' + res.status + ').'); return; }
   q.grade = v; q.note = note;
-  const next = queue.findIndex((x, j) => j > i && !x.grade);
-  i = next < 0 ? Math.min(i + 1, queue.length - 1) : next;
+  advance();
+}
+function advance() {
+  // Next ungraded after here; failing that, wrap to any item still ungraded; else
+  // stay put (render() then shows the "nothing left" state). Without the wrap,
+  // grading the LAST item left the screen frozen at the end of the queue — which
+  // reads as "nothing happened", so the same request got graded again and again.
+  const after = queue.findIndex((x, j) => j > i && !x.grade);
+  const anywhere = queue.findIndex(x => !x.grade);
+  if (after >= 0) i = after;
+  else if (anywhere >= 0) i = anywhere;
   render();
 }
 document.addEventListener('keydown', e => {
