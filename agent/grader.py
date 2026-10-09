@@ -27,7 +27,9 @@ from agent.samples import load_samples
 from agent.summary import build_summary
 
 PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Grade the door</title>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Grade the door</title>
 <style>
   :root { color-scheme: dark; }
   body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -62,6 +64,23 @@ PAGE = """<!doctype html>
   #note { flex: 1; min-width: 200px; font: inherit; background: #1d2228; color: inherit;
           border: 1px solid #39414b; border-radius: 4px; padding: 6px 10px; }
   #empty { padding: 40px; color: #7d8896; }
+  /* Phone: one column, bigger type and tap targets, no keyboard hints. Without
+     this (and the viewport meta above) the page renders at desktop width and
+     every glyph comes out tiny. */
+  @media (max-width: 760px) {
+    body { font-size: 15.5px; }
+    header { flex-wrap: wrap; row-gap: 6px; padding: 8px 12px; }
+    #hint { display: none; }
+    #bar { flex-basis: 100%; }
+    main { grid-template-columns: 1fr; height: auto; min-height: 40vh; padding-bottom: 140px; }
+    section { overflow: visible; padding: 14px; }
+    section + section { border-left: 0; border-top: 1px solid #262b31; }
+    h2 { font-size: 12px; margin-top: 12px; }
+    .jev div { max-width: none; }
+    footer { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+    #note { order: -1; flex: 1 1 100%; min-height: 44px; }
+    button { flex: 1 1 calc(50% - 8px); min-height: 48px; font-size: 15px; }
+  }
 </style></head><body>
 <header>
   <strong>Grade the door</strong>
@@ -79,11 +98,24 @@ PAGE = """<!doctype html>
 </footer>
 <script>
 let queue = [], i = 0;
-const esc = s => (s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+// `answer` in the log is a number (a Noul probability, or a D3 score), not a
+// string -- so esc() must coerce before .replace(), or the whole render throws
+// and the page never leaves "Loading...".
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const fmt = s => (typeof s === 'number' ? Math.round(s * 1000) / 1000 : s);
 const KEYS = { '1':'right', '2':'too_strict', '3':'too_lenient', '4':'unclear' };
 
 async function load() {
-  queue = await (await fetch('/api/queue')).json();
+  try {
+    const res = await fetch('/api/queue');
+    if (!res.ok) throw new Error('/api/queue -> HTTP ' + res.status);
+    queue = await res.json();
+  } catch (err) {
+    document.getElementById('main').innerHTML =
+      '<div id="empty">Could not load the queue: ' + esc(err && err.message || err) +
+      '.<br>Is this the grader service, and is its /state volume mounted?</div>';
+    return;
+  }
   i = queue.findIndex(q => !q.grade);           // resume at the first ungraded
   if (i < 0) i = 0;
   render();
@@ -102,7 +134,7 @@ function render() {
   const qTitle = a => (a.means ? a.q + ' — ' + a.means : a.q);
   const jev = q.jev.map(a => a.failed
       ? `<div><span title="${esc(qTitle(a))}">${esc(qLabel(a))}</span><span class="fail">FAILED</span></div>`
-      : `<div><span title="${esc(qTitle(a))}">${esc(qLabel(a))}</span><span>${esc(a.answer)}</span></div>`).join('');
+      : `<div><span title="${esc(qTitle(a))}">${esc(qLabel(a))}</span><span>${esc(fmt(a.answer))}</span></div>`).join('');
   const held = q.holdback ? '<span class="holdback">holdback: admitted</span>' : '';
   main.innerHTML = `
     <section>

@@ -81,6 +81,25 @@ def test_the_index_page_serves_the_ui(tmp_path, monkeypatch):
     assert "Grade the door" in response.text
 
 
+def test_the_page_is_mobile_ready_and_coerces_a_numeric_answer(tmp_path, monkeypatch):
+    """Two bugs the UI shipped with, pinned so they cannot come back.
+
+    * No `<meta name="viewport">` -> a phone renders the page at desktop width and
+      scales the whole thing down, which is why the fonts came out tiny.
+    * `answer` is a NUMBER in the log (a Noul probability or a D3 score), but the
+      page rendered it through an esc() that called `.replace()` on it. That throws
+      a TypeError inside render(), so the first gradeable request left the page
+      stuck on "Loading..." -- invisible in an empty-queue test, which is why it
+      reached the NAS.
+    """
+    _wire(tmp_path, monkeypatch, [])
+    page = TestClient(create_app()).get("/").text
+    assert 'name="viewport"' in page
+    # The answer is coerced/formatted, never handed to `.replace()` raw.
+    assert "String(s ??" in page
+    assert "esc(a.answer)" not in page
+
+
 def test_posting_a_grade_writes_it(tmp_path, monkeypatch):
     _wire(tmp_path, monkeypatch, [_record("r1")])
     _sample(tmp_path / "samples.jsonl", "r1")
