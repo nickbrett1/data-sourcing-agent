@@ -258,9 +258,10 @@ def resolve_policy(
     One env var flips the switch (`GATE_ENFORCE`), and the frozen cutoff refines
     the number it flips to. Two independent things on purpose:
 
-    * **no cutoff yet** — enforce at the provisional probability cut, the declared
-      0.91 that the log already stamps as `threshold_at_time`. This is how the
-      switch goes on *today*, before there is a population to measure.
+    * **no cutoff yet** — enforce at the provisional probability cut (the declared
+      `D2_CUT_PLACEHOLDER`) that the log already stamps as `threshold_at_time`.
+      This is how the switch goes on *today*, before there is a population to
+      measure.
     * **an armed cutoff** — enforce at the measured rate boundary instead. The
       probability cut stays in the log as the refinement it was.
 

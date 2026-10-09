@@ -95,11 +95,18 @@ D3_LEVELS = ["none", "plausible", "close", "exact"]
 D3_EXACT = D3_LEVELS.index("exact")
 D3_CLOSE = D3_LEVELS.index("close")
 
-# The D2 probability cut is a PLACEHOLDER (10:1 false-accept:false-reject -> 0.91,
-# gate memo §2). Nothing calibrates it yet. In observe-only it is inert; for
-# enforcement the rate (`escalation_cutoff`) is the day-one lever, and this number
-# becomes the log's `threshold_at_time` until calibration earns a real one.
-D2_CUT_PLACEHOLDER = 0.91
+# The D2 probability cut is a PLACEHOLDER. The original 0.91 was a pure cost-ratio
+# number (10:1 false-accept:false-reject -> 10/11, gate memo §2), chosen before any
+# log existed. Measured against the front door, it sits at the TOP of the
+# distribution a fully-specified request actually gets: known-good requests score
+# ~0.82-0.92 on D2 while vague ones score ~0.02-0.05, so 0.91 false-rejected ~5 in
+# 6 good requests -- a wall, not a filter. Reset to 0.5: roughly a 1:1 cost ratio
+# (a false accept and a false reject are close in cost here -- the deterministic
+# Validator catches illegal guesses and every ticket still needs a human sign-off),
+# comfortably below the good cluster even allowing for D2's ~0.1 run-to-run spread,
+# and far above every vague request seen. Still a placeholder: the measured rate
+# boundary replaces it once the log arms (agent/cutoff.py).
+D2_CUT_PLACEHOLDER = 0.5
 D1_CUT_PLACEHOLDER = 0.5
 D5_CUT_PLACEHOLDER = 0.5
 # The holdback fraction (§6.6): ~1–5%. Exact value open (§8 #8); inert until enforced.
