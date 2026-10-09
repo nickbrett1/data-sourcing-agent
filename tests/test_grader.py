@@ -173,6 +173,20 @@ def test_grading_the_last_item_is_not_a_dead_stop(tmp_path, monkeypatch):
     assert "q.grade === v" in page                                     # no duplicate writes
 
 
+def test_the_done_state_leads_with_the_result_not_a_request(tmp_path, monkeypatch):
+    """Finished = summary, not a request you can accidentally re-grade. The grade
+    controls come back only when the grader asks to review."""
+    _wire(tmp_path, monkeypatch, [])
+    _sample(tmp_path / "samples.jsonl", "r1")
+    page = TestClient(create_app()).get("/").text
+    assert 'id="controls"' in page and 'id="donebar"' in page
+    assert "document.getElementById('controls').hidden = done && !review" in page
+    assert 'id="summary"' in page
+    assert "All ${n} requests graded." in page
+    assert "review / re-grade" in page
+    assert "const isDone = () => queue.length > 0 && queue.every(x => x.grade)" in page
+
+
 def test_a_legacy_nan_answer_does_not_500_the_queue(tmp_path, monkeypatch):
     """An old log row can carry a bare `NaN` token, which Python reads back as a
     non-finite float. Starlette's JSONResponse (allow_nan=False) rejects that, so

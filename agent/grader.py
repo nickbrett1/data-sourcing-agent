@@ -81,6 +81,14 @@ PAGE = """<!doctype html>
   #legend b { color: #cfd6dd; font-weight: 600; }
   #note { flex: 1; min-width: 200px; font: inherit; background: #1d2228; color: inherit;
           border: 1px solid #39414b; border-radius: 4px; padding: 6px 10px; }
+  #controls, #donebar { display: flex; flex: 1 1 100%; gap: 10px; align-items: center; flex-wrap: wrap; }
+  /* `hidden` must win over the flex rule, or the grade buttons stay on screen in
+     the done state and invite accidental re-grades. */
+  #controls[hidden], #donebar[hidden] { display: none; }
+  #tally { color: #7d8896; }
+  #summary ul { list-style: none; padding: 0; margin: 10px 0; }
+  #summary li { padding: 3px 0; }
+  #summary .hint { color: #7d8896; font-size: 13px; }
   #empty { padding: 40px; color: #7d8896; }
   /* Phone: one column, bigger type and tap targets, no keyboard hints. Without
      this (and the viewport meta above) the page renders at desktop width and
@@ -113,14 +121,29 @@ PAGE = """<!doctype html>
      <b>too strict</b> it stopped a fine request (lower the cut) ·
      <b>too lenient</b> it let a bad one through (raise the cut) ·
      <b>unclear</b> the sample doesn't settle it (moves nothing)</p>
-  <input id="note" placeholder="note (optional, saved with the verdict)">
-  <button data-v="right">1 · right</button>
-  <button data-v="too_strict">2 · too strict</button>
-  <button data-v="too_lenient">3 · too lenient</button>
-  <button data-v="unclear">4 · unclear</button>
+  <div id="controls">
+    <input id="note" placeholder="note (optional, saved with the verdict)">
+    <button data-v="right">1 · right</button>
+    <button data-v="too_strict">2 · too strict</button>
+    <button data-v="too_lenient">3 · too lenient</button>
+    <button data-v="unclear">4 · unclear</button>
+  </div>
+  <div id="donebar" hidden>
+    <span id="tally"></span>
+    <button id="review">review / re-grade →</button>
+  </div>
 </footer>
 <script>
-let queue = [], i = 0;
+let queue = [], i = 0, review = false;
+// The queue is done when nothing is left ungraded. Then the page leads with the
+// result, not with a request: grade controls are hidden until the grader asks to
+// review/re-grade (the history has value, but it is not the front door).
+const isDone = () => queue.length > 0 && queue.every(x => x.grade);
+const tally = () => {
+  const t = { right: 0, too_strict: 0, too_lenient: 0, unclear: 0 };
+  for (const x of queue) if (x.grade) t[x.grade] = (t[x.grade] || 0) + 1;
+  return t;
+};
 // `answer` in the log is a number (a Noul probability, or a D3 score), not a
 // string -- so esc() must coerce before .replace(), or the whole render throws
 // and the page never leaves "Loading...".
@@ -145,13 +168,39 @@ async function load() {
 }
 function render() {
   const graded = queue.filter(q => q.grade).length;
-  const done = queue.length > 0 && graded === queue.length;
+  const done = isDone();
   document.getElementById('count').textContent = done
       ? `all ${queue.length} graded · nothing left`
       : `${i + 1} / ${queue.length} · ${graded} graded`;
   document.getElementById('fill').style.width = queue.length ? (graded / queue.length * 100) + '%' : '0';
-  const q = queue[i];
+
+  // Done = result-first. Show the grade controls only in review mode, so the
+  // completed screen does not sit there inviting accidental re-grades.
+  document.getElementById('controls').hidden = done && !review;
+  document.getElementById('donebar').hidden = !done;
+  document.getElementById('review').textContent = review ? '← back to summary' : 'review / re-grade →';
+
   const main = document.getElementById('main');
+  if (done && !review) {
+    const t = tally(), n = queue.length;
+    main.innerHTML = `
+      <section id="summary">
+        <h2>Done</h2>
+        <p>All ${n} requests graded.</p>
+        <ul>
+          <li><b>${t.right}</b> right</li>
+          <li><b>${t.too_strict}</b> too strict — lower the cut</li>
+          <li><b>${t.too_lenient}</b> too lenient — raise the cut</li>
+          <li><b>${t.unclear}</b> unclear — moves nothing</li>
+        </ul>
+        <p class="hint">The history is kept in the log. Use “review / re-grade” to look back.</p>
+      </section>`;
+    document.getElementById('tally').textContent =
+      `${t.right} right · ${t.too_strict} too strict · ${t.too_lenient} too lenient · ${t.unclear} unclear`;
+    return;
+  }
+
+  const q = queue[i];
   if (!q) { main.innerHTML = '<div id="empty">Nothing to grade. Log some traffic first.</div>'; return; }
   // Readable question name (the part before the colon) with the full
   // explanation and the raw code on hover — the grader should not have to
@@ -175,7 +224,7 @@ function render() {
       <h2>Jev</h2><div class="jev">${jev}</div>
       <h2>Door said</h2><div><span class="door ${esc(q.door)}">${esc(q.door)}</span>${held}</div>
       ${why ? `<div class="why">why: ${why}</div>` : ''}
-      <div class="verdict">your verdict: <b>${q.grade ? esc(q.grade) : 'not graded yet'}</b>${done ? ' · all done' : ''}</div>
+      <div class="verdict">your verdict: <b>${q.grade ? esc(q.grade) : 'not graded yet'}</b>${done && review ? ' · reviewing' : ''}</div>
     </section>
     <section>
       <h2>Ticket</h2><pre>${esc(q.ticket)}</pre>
@@ -206,7 +255,13 @@ function advance() {
   else if (anywhere >= 0) i = anywhere;
   render();
 }
+document.getElementById('review').onclick = () => {
+  review = !review;
+  if (review) i = 0;
+  render();
+};
 document.addEventListener('keydown', e => {
+  if (isDone() && !review) return;          // the summary screen takes no grade keys
   if (e.target.id === 'note' && e.key !== 'Escape' && !e.metaKey && !e.ctrlKey) return;
   if (KEYS[e.key]) { e.preventDefault(); grade(KEYS[e.key]); }
   else if (e.key === 'ArrowRight') { i = Math.min(i + 1, queue.length - 1); render(); }
