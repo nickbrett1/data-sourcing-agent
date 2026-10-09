@@ -32,14 +32,22 @@ PAGE = """<!doctype html>
 <title>Grade the door</title>
 <style>
   :root { color-scheme: dark; }
+  html, body { height: 100%; }
+  /* Full-height column: header and footer take their natural height, `main` takes
+     the rest and scrolls. The footer therefore RESERVES its own space instead of
+     floating over the content -- a fixed-position footer never does, so no
+     padding-bottom can reliably clear it (it wraps to a different height on a
+     narrow phone, which is why the buttons covered the ticket). */
   body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-         margin: 0; background: #101214; color: #d7dde3; }
-  header { position: sticky; top: 0; background: #16191d; padding: 10px 18px;
+         margin: 0; background: #101214; color: #d7dde3;
+         display: flex; flex-direction: column; height: 100dvh; }
+  header { background: #16191d; padding: 10px 18px; flex: 0 0 auto;
            border-bottom: 1px solid #262b31; display: flex; gap: 18px; align-items: center; }
   #bar { flex: 1; height: 6px; background: #262b31; border-radius: 3px; overflow: hidden; }
   #fill { height: 100%; width: 0; background: #3d9970; transition: width .15s; }
-  main { display: grid; grid-template-columns: 1fr 1fr; gap: 0; height: calc(100vh - 44px); }
-  section { padding: 16px 18px; overflow: auto; }
+  main { display: grid; grid-template-columns: 1fr 1fr; gap: 0;
+         flex: 1 1 auto; min-height: 0; overflow: auto; }
+  section { padding: 16px 18px; }
   section + section { border-left: 1px solid #262b31; }
   h2 { font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
        color: #7d8896; margin: 0 0 8px; font-weight: 600; }
@@ -51,9 +59,9 @@ PAGE = """<!doctype html>
   .door.ask_clarifying { background: #3a3320; color: #e7d06e; }
   .door.reject { background: #3a2020; color: #e78b8b; }
   .holdback { color: #8aa1b8; font-style: italic; margin-left: 8px; }
-  footer { position: fixed; bottom: 0; left: 0; right: 0; background: #16191d;
-           border-top: 1px solid #262b31; padding: 10px 18px; display: flex; gap: 10px;
-           align-items: center; flex-wrap: wrap; }
+  footer { background: #16191d; flex: 0 0 auto;
+           border-top: 1px solid #262b31; padding: 10px 18px calc(10px + env(safe-area-inset-bottom));
+           display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   button { font: inherit; padding: 6px 14px; border-radius: 4px; border: 1px solid #39414b;
            background: #1d2228; color: #d7dde3; cursor: pointer; }
   button:hover { background: #262c34; }
@@ -72,8 +80,8 @@ PAGE = """<!doctype html>
     header { flex-wrap: wrap; row-gap: 6px; padding: 8px 12px; }
     #hint { display: none; }
     #bar { flex-basis: 100%; }
-    main { grid-template-columns: 1fr; height: auto; min-height: 40vh; padding-bottom: 140px; }
-    section { overflow: visible; padding: 14px; }
+    main { grid-template-columns: 1fr; }
+    section { padding: 14px; }
     section + section { border-left: 0; border-top: 1px solid #262b31; }
     h2 { font-size: 12px; margin-top: 12px; }
     .jev div { max-width: none; }

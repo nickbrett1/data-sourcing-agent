@@ -98,6 +98,10 @@ def test_the_page_is_mobile_ready_and_coerces_a_numeric_answer(tmp_path, monkeyp
     # The answer is coerced/formatted, never handed to `.replace()` raw.
     assert "String(s ??" in page
     assert "esc(a.answer)" not in page
+    # The footer reserves its own space (flex column) instead of floating over the
+    # content -- a fixed footer covered the last lines of the ticket on a phone.
+    assert "position: fixed" not in page
+    assert "flex-direction: column" in page
 
 
 def test_posting_a_grade_writes_it(tmp_path, monkeypatch):
