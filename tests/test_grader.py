@@ -15,13 +15,14 @@ def _sample(path, rid, text="one day of SPY options", ticket="dataset: OPRA.PILL
     append_sample(rid, text, ticket, path=path)
 
 
-def _record(rid, *, action="ask_clarifying", holdback=False, failed=False):
+def _record(rid, *, action="ask_clarifying", holdback=False, failed=False, answer=0.4, threshold=0.91):
     return {
         "request_id": rid,
         "question_id": "d2_specification_sufficient",
         "primitive": "noul",
-        "answer": 0.4,
+        "answer": answer,
         "failed": failed,
+        "threshold_at_time": threshold,
         "action_computed": action,
         "holdback": holdback,
     }
@@ -138,3 +139,21 @@ def test_each_jev_answer_carries_a_plain_english_means(tmp_path, monkeypatch):
     entry = build_queue()[0]["jev"][0]
     assert entry["means"].startswith("Specification sufficient")
     assert "d2_specification_sufficient" not in entry["means"]
+
+
+def test_an_answer_carries_the_cut_that_was_in_force(tmp_path, monkeypatch):
+    """So the UI can show *why* the door stopped: this answer fell below this cut."""
+    _wire(tmp_path, monkeypatch, [_record("r1", answer=0.8, threshold=0.91)])
+    _sample(tmp_path / "samples.jsonl", "r1")
+    entry = build_queue()[0]["jev"][0]
+    assert entry["answer"] == 0.8
+    assert entry["threshold"] == 0.91
+
+
+def test_the_page_explains_which_answer_breached_its_cut(tmp_path, monkeypatch):
+    _wire(tmp_path, monkeypatch, [_record("r1")])
+    _sample(tmp_path / "samples.jsonl", "r1")
+    page = TestClient(create_app()).get("/").text
+    # The breach is computed from answer < threshold in the page, not left to the eye.
+    assert "a.answer < a.threshold" in page
+    assert "class=\"breach\"" in page

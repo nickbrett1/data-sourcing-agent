@@ -54,6 +54,11 @@ PAGE = """<!doctype html>
   pre { white-space: pre-wrap; word-break: break-word; margin: 0 0 20px; }
   .jev div { display: flex; justify-content: space-between; padding: 2px 0; max-width: 420px; }
   .fail { color: #b07a3f; }
+  /* The row whose answer fell below the cut in force at the time -- the reason
+     the door said what it said. Tinted, with the cut shown after the answer. */
+  .breach { color: #e7d06e; }
+  .breach .cut { color: #a89a5e; }
+  .why { color: #e7d06e; margin-top: 6px; }
   .door { display: inline-block; padding: 2px 10px; border-radius: 3px; font-weight: 700; }
   .door.proceed { background: #1d3a2a; color: #6ee7a8; }
   .door.ask_clarifying { background: #3a3320; color: #e7d06e; }
@@ -148,15 +153,23 @@ function render() {
   // remember what `d2_specification_sufficient` means.
   const qLabel = a => ((a.means || a.q || '').split(':')[0]).trim();
   const qTitle = a => (a.means ? a.q + ' — ' + a.means : a.q);
+  // Every question is a minimum in `decide`: the door stops when an answer falls
+  // BELOW the cut that was in force at the time. Mark those rows so the "why the
+  // door said X" is on screen instead of something to reconstruct by hand.
+  const breached = a => !a.failed && typeof a.answer === 'number'
+      && typeof a.threshold === 'number' && a.answer < a.threshold;
   const jev = q.jev.map(a => a.failed
       ? `<div><span title="${esc(qTitle(a))}">${esc(qLabel(a))}</span><span class="fail">FAILED</span></div>`
-      : `<div><span title="${esc(qTitle(a))}">${esc(qLabel(a))}</span><span>${esc(fmt(a.answer))}</span></div>`).join('');
+      : `<div${breached(a) ? ' class="breach"' : ''}><span title="${esc(qTitle(a))}">${esc(qLabel(a))}</span><span>${esc(fmt(a.answer))}${breached(a) ? ` <span class="cut">(cut ${esc(fmt(a.threshold))} \u2717)</span>` : ''}</span></div>`).join('');
+  const why = q.jev.filter(breached)
+      .map(a => `${qLabel(a)} ${fmt(a.answer)} &lt; ${fmt(a.threshold)}`).join(' · ');
   const held = q.holdback ? '<span class="holdback">holdback: admitted</span>' : '';
   main.innerHTML = `
     <section>
       <h2>Request</h2><pre>${esc(q.text)}</pre>
       <h2>Jev</h2><div class="jev">${jev}</div>
       <h2>Door said</h2><div><span class="door ${esc(q.door)}">${esc(q.door)}</span>${held}</div>
+      ${why ? `<div class="why">why: ${why}</div>` : ''}
     </section>
     <section>
       <h2>Ticket</h2><pre>${esc(q.ticket)}</pre>
@@ -216,6 +229,7 @@ def build_queue(*, records: list[dict] | None = None) -> list[dict]:
                 "q": row.get("question_id"),
                 "means": question_legend(row.get("question_id", "")),
                 "answer": row.get("answer"),
+                "threshold": row.get("threshold_at_time"),
                 "failed": bool(row.get("failed")),
             }
             for row in rows
