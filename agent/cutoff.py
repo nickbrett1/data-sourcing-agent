@@ -128,7 +128,7 @@ def arm(
             reason=f"only {len(recent)} D2 scores; need {min_n} to arm",
         )
     return Cutoff(
-        value=escalation_cutoff(recent, rate),
+        value=escalation_cutoff(recent, rate, side="low"),
         rate=rate,
         window=window,
         n=len(recent),

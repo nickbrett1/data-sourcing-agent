@@ -41,7 +41,7 @@ def test_an_armed_cutoff_is_the_top_rate_of_the_window():
     cut = arm(scores, rate=0.10, window=200, min_n=50, now=NOW)
     assert cut.armed is True
     assert cut.n == 100
-    assert cut.value == escalation_cutoff(scores, 0.10)
+    assert cut.value == escalation_cutoff(scores, 0.10, side="low")
 
 
 def test_the_window_uses_trailing_scores_only():
@@ -49,7 +49,7 @@ def test_the_window_uses_trailing_scores_only():
     recent = [0.9 + i / 1000 for i in range(100)]
     cut = arm(older + recent, rate=0.10, window=100, min_n=50, now=NOW)
     assert cut.n == 100
-    assert cut.value == escalation_cutoff(recent, 0.10)
+    assert cut.value == escalation_cutoff(recent, 0.10, side="low")
 
 
 # --- reading scores out of the log -------------------------------------------

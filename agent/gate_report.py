@@ -296,7 +296,7 @@ def render(report: GateReport) -> str:
     if d2 and d2.values:
         add(f"  D2 scores available: {d2.usable}")
         for rate in REVIEW_RATES:
-            cut = escalation_cutoff(d2.values, rate)
+            cut = escalation_cutoff(d2.values, rate, side="low")
             add(f"    top {rate:>5.0%}  ->  escalate when D2 < {_fmt(cut, 3)}")
     else:
         add("  (no D2 scores yet)")

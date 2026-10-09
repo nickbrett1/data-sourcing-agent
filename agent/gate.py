@@ -537,7 +537,7 @@ def should_retain_state(decision: GateDecision) -> bool:
 # --- the day-one lever: a rate, not a probability (§8 #3a) -------------------
 
 
-def escalation_cutoff(scores: Sequence[float], rate: float) -> float:
+def escalation_cutoff(scores: Sequence[float], rate: float, *, side: str = "top") -> float:
     """The score at the top-`rate` boundary — "escalate the top N%" as a number.
 
     Needs no labels: it assumes only that Jev's score is monotone in risk and
@@ -550,15 +550,18 @@ def escalation_cutoff(scores: Sequence[float], rate: float) -> float:
     if not scores:
         raise ValueError("cannot compute a cutoff from no scores")
     ordered = sorted(scores)
-    if rate <= 0.0:
-        return float("inf")  # nothing escalates
-    if rate >= 1.0:
-        return ordered[0]  # everything escalates
+    if rate <= 0.0:  # nothing escalates: unreachable by any score
+        return float("-inf") if side == "low" else float("inf")
+    if rate >= 1.0:  # everything escalates
+        return float("inf") if side == "low" else ordered[0]
     # An order statistic, not an interpolated quantile: `k` is how many to
-    # escalate, and the cutoff is the k-th largest. So exactly the top `k`
-    # scores are at or above it — which is what "escalate the top N%" means.
+    # escalate, and the cutoff is the k-th score from that end. `side="top"` is
+    # for a risk score (high = risky, e.g. `decide` stops when `score >= cut`);
+    # `side="low"` is for D2, where LOW = risky and `decide` stops when
+    # `score < cut` — so the boundary must come off the bottom, or "escalate the
+    # top N%" would stop ~(1-N) of requests instead of N.
     k = max(1, round(rate * len(ordered)))
-    return ordered[len(ordered) - k]
+    return ordered[k - 1] if side == "low" else ordered[len(ordered) - k]
 
 
 def median_score(scores: Sequence[float]) -> float:

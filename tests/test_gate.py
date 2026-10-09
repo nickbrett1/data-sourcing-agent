@@ -397,3 +397,17 @@ def test_d3_below_close_reports_the_expected_level_not_a_truncated_index():
     reason = next(r for r in d.reasons if D3 in r)
     assert "1.65" in reason
     assert "plausible" not in reason
+
+
+def test_rate_cutoff_escalates_the_bottom_n_for_d2():
+    """`side="low"`: D2 is a sufficiency score, so the risky end is the BOTTOM.
+
+    With the default (top) side, `decide`'s "stop when D2 < cut" would stop ~90%
+    at rate 0.1 instead of 10%. This pins the direction.
+    """
+    from agent.gate import escalation_cutoff
+
+    scores = [0.02, 0.03, 0.05, 0.82, 0.88, 0.88, 0.90, 0.90, 0.92, 0.92]
+    cut = escalation_cutoff(scores, 0.10, side="low")
+    assert sum(s < cut for s in scores) <= 1          # ~10% stopped, not 90%
+    assert escalation_cutoff(scores, 0.10) == max(scores)  # top side unchanged
