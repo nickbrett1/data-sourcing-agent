@@ -78,9 +78,10 @@ from agent.interpret import (
 from agent.jev import JevClient
 from agent.model import build_model
 from agent.register import register_with_litellm
+from agent.requestbook import write_draft
 from agent.roost import RoostBridge
 from agent.samples import append_sample
-from agent.ticket import TicketProposal, render_ticket_yaml
+from agent.ticket import Ticket, TicketProposal, render_ticket_yaml
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 INSTRUCTIONS_PATH = PACKAGE_ROOT.parent / "prompts" / "instructions.md"
@@ -325,6 +326,22 @@ class TicketAgentExecutor(AgentExecutor):
         except Exception as exc:  # a label that cannot be written must not fail a turn
             print(f"[label] skipped: {exc!r}", flush=True)
 
+    def _file_draft(self, ticket: Ticket, request_id: str) -> None:
+        """Write the ticket into the book's inbox/ — the durable artifact (§4).
+
+        Best-effort, like `_label` and `_shadow_sample`: the ticket still leaves
+        the turn as the A2A artifact, so a failed write degrades the turn to the
+        old, artifact-only behaviour rather than failing it. But unlike those
+        streams this is a *product*, not evidence, so a failure is logged and
+        never swallowed — a silent write failure is the exact hole the write path
+        exists to close (memo §1).
+        """
+        try:
+            path = write_draft(ticket, request_id=request_id)
+            print(f"[requestbook] filed draft: {path}", flush=True)
+        except Exception as exc:  # see docstring: degrade, but say so out loud
+            print(f"[requestbook] write failed: {exc!r}", flush=True)
+
     async def _shadow_sample(self, user_input: str, intent: ParsedIntent | None, request_id: str) -> None:
         """Generate and log the ticket a stopped request would have produced.
 
@@ -470,6 +487,11 @@ class TicketAgentExecutor(AgentExecutor):
         # stopped request has no artifact to judge — "Jev said stop" is not, alone,
         # right or wrong (agent/samples.py). Drafts spend nothing, so this is free.
         append_sample(request_id, user_input, rendered)
+        # The durable artifact: the draft lands in the book's inbox/ and nowhere
+        # else (design memo data-request-book-v1 §4). Only on the success path —
+        # a door-stopped turn is not a draft awaiting approval and must not file
+        # one. Best-effort, but logged.
+        self._file_draft(ticket, request_id)
         # The only label the agent can write with certainty: a ticket exists. Whether
         # it was any good is a human's call, logged later from outside (§6.5.1).
         self._label(request_id, Outcome.drafted)
