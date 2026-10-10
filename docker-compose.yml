@@ -57,6 +57,12 @@ services:
       # Writable, so the remembered agent id survives a redeploy (§5.6). A
       # NAS-side .env sets AGENT_STATE_HOST_DIR to the deployed directory.
       - ${AGENT_STATE_HOST_DIR:-./state}:/state
+      # The request book's write-only inbox (design memo data-request-book-v1
+      # §4.1). The agent writes drafts here and NOWHERE else — it never sees
+      # approved/, in_flight/ or done/, so there is no path from its output to a
+      # spend. Point REQUESTS_INBOX_HOST_DIR at <book>/inbox on the NAS (the book
+      # is a git repo autocommitted from the NAS host, not by this container).
+      - ${REQUESTS_INBOX_HOST_DIR:-./requests-inbox}:/requests/inbox
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       # Homepage group: kept as "Services". nas-reach-mcp chose "MCP Servers",
