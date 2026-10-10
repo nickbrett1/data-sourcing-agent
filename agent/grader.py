@@ -76,8 +76,11 @@ PAGE = """<!doctype html>
   button[data-v="too_strict"] { border-color: #6f5a2f; }
   button[data-v="too_lenient"] { border-color: #6f3030; }
   kbd { background: #262b31; padding: 1px 6px; border-radius: 3px; font-size: 12px; }
-  #legend { flex: 1 1 100%; order: -2; margin: 0 0 6px; color: #7d8896;
-            font-size: 12px; line-height: 1.5; }
+  /* The legend is a one-line summary that expands on tap -- it is reference, not
+     something to keep on screen, and open it ate a third of a phone display. */
+  #legendbox { flex: 1 1 100%; order: -2; }
+  #legendbox summary { color: #7d8896; font-size: 12px; cursor: pointer; }
+  #legend { margin: 6px 0 0; color: #7d8896; font-size: 12px; line-height: 1.5; }
   #legend b { color: #cfd6dd; font-weight: 600; }
   #note { flex: 1; min-width: 200px; font: inherit; background: #1d2228; color: inherit;
           border: 1px solid #39414b; border-radius: 4px; padding: 6px 10px; }
@@ -108,7 +111,8 @@ PAGE = """<!doctype html>
     .jev div { max-width: none; }
     footer { flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
     #note { order: -1; flex: 1 1 100%; min-height: 44px; }
-    #legend { order: -2; font-size: 13px; }
+    #legendbox summary { font-size: 13px; }
+    #legend { font-size: 13px; }
     button { flex: 1 1 calc(50% - 8px); min-height: 48px; font-size: 15px; }
   }
 </style></head><body>
@@ -120,10 +124,13 @@ PAGE = """<!doctype html>
 </header>
 <main id="main"><div id="empty">Loading…</div></main>
 <footer>
-  <p id="legend"><b>right</b> the door did the right thing ·
-     <b>too strict</b> it stopped a fine request (lower the cut) ·
-     <b>too lenient</b> it let a bad one through (raise the cut) ·
-     <b>unclear</b> the sample doesn't settle it (moves nothing)</p>
+  <details id="legendbox">
+    <summary>what do the verdicts mean?</summary>
+    <p id="legend"><b>right</b> the door did the right thing ·
+       <b>too strict</b> it stopped a fine request (lower the cut) ·
+       <b>too lenient</b> it let a bad one through (raise the cut) ·
+       <b>unclear</b> the sample doesn't settle it (moves nothing)</p>
+  </details>
   <div id="controls">
     <input id="note" placeholder="note (optional, saved with the verdict)">
     <button data-v="right">1 · right</button>

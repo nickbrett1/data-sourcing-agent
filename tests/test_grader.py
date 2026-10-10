@@ -105,6 +105,9 @@ def test_the_page_is_mobile_ready_and_coerces_a_numeric_answer(tmp_path, monkeyp
     assert "flex-direction: column" in page
     # The verdicts are explained on screen, so `unclear` does not read as a riddle.
     assert 'id="legend"' in page
+    # ...but only behind a tap: the legend is reference, not always-on chrome.
+    assert '<details id="legendbox">' in page
+    assert '<details id="legendbox" open>' not in page
     assert "doesn't settle it" in page
 
 
