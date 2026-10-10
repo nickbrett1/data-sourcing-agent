@@ -173,6 +173,21 @@ def test_grading_the_last_item_is_not_a_dead_stop(tmp_path, monkeypatch):
     assert "q.grade === v" in page                                     # no duplicate writes
 
 
+def test_you_can_skip_an_item_without_grading_it(tmp_path, monkeypatch):
+    """Re-grading means flipping through history; skipping must move on without
+    writing a grade."""
+    _wire(tmp_path, monkeypatch, [])
+    _sample(tmp_path / "samples.jsonl", "r1")
+    page = TestClient(create_app()).get("/").text
+    assert 'id="skip"' in page and 'id="prev"' in page
+    assert "function skipItem()" in page
+    assert "document.getElementById('skip').onclick = skipItem" in page
+    assert "document.getElementById('prev').onclick = prevItem" in page
+    # Skipping must not reach the grade endpoint.
+    body = page.split("function skipItem()")[1].split("function prevItem()")[0]
+    assert "fetch(" not in body and "/api/grade" not in body
+
+
 def test_the_done_state_leads_with_the_result_not_a_request(tmp_path, monkeypatch):
     """Finished = summary, not a request you can accidentally re-grade. The grade
     controls come back only when the grader asks to review."""

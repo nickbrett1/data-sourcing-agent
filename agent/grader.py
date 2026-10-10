@@ -85,6 +85,9 @@ PAGE = """<!doctype html>
   /* `hidden` must win over the flex rule, or the grade buttons stay on screen in
      the done state and invite accidental re-grades. */
   #controls[hidden], #donebar[hidden] { display: none; }
+  /* Navigation, not a verdict: set apart from the four grade buttons. The id
+     selectors also beat the phone rule that stretches every `button` to 50%. */
+  #prev, #skip { flex: 0 0 auto; background: transparent; color: #9aa5b1; }
   #tally { color: #7d8896; }
   #summary ul { list-style: none; padding: 0; margin: 10px 0; }
   #summary li { padding: 3px 0; }
@@ -113,7 +116,7 @@ PAGE = """<!doctype html>
   <strong>Grade the door</strong>
   <span id="count">…</span>
   <div id="bar"><div id="fill"></div></div>
-  <span id="hint">1 right · 2 too strict · 3 too lenient · 4 unclear · ← → move</span>
+  <span id="hint">1 right · 2 too strict · 3 too lenient · 4 unclear · ← → / s skip</span>
 </header>
 <main id="main"><div id="empty">Loading…</div></main>
 <footer>
@@ -127,6 +130,8 @@ PAGE = """<!doctype html>
     <button data-v="too_strict">2 · too strict</button>
     <button data-v="too_lenient">3 · too lenient</button>
     <button data-v="unclear">4 · unclear</button>
+    <button id="prev" type="button" title="previous item (no grade)">‹ prev</button>
+    <button id="skip" type="button" title="next item (no grade)">skip ›</button>
   </div>
   <div id="donebar" hidden>
     <span id="tally"></span>
@@ -244,6 +249,25 @@ async function grade(v) {
   q.grade = v; q.note = note;
   advance();
 }
+// Move without grading. While work remains, "next" means the next ungraded item
+// (wrap if it is behind you); once everything is graded, it is simply the next
+// item, so re-grade review can walk the whole history. `prev` is a plain step.
+function skipItem() {
+  if (!queue.length) return;
+  if (!isDone()) {
+    const after = queue.findIndex((x, j) => j > i && !x.grade);
+    if (after >= 0) { i = after; render(); return; }
+    const anywhere = queue.findIndex(x => !x.grade);
+    if (anywhere >= 0) { i = anywhere; render(); return; }
+  }
+  i = (i + 1) % queue.length;
+  render();
+}
+function prevItem() {
+  if (!queue.length) return;
+  i = (i - 1 + queue.length) % queue.length;
+  render();
+}
 function advance() {
   // Next ungraded after here; failing that, wrap to any item still ungraded; else
   // stay put (render() then shows the "nothing left" state). Without the wrap,
@@ -260,12 +284,14 @@ document.getElementById('review').onclick = () => {
   if (review) i = 0;
   render();
 };
+document.getElementById('skip').onclick = skipItem;
+document.getElementById('prev').onclick = prevItem;
 document.addEventListener('keydown', e => {
   if (isDone() && !review) return;          // the summary screen takes no grade keys
   if (e.target.id === 'note' && e.key !== 'Escape' && !e.metaKey && !e.ctrlKey) return;
   if (KEYS[e.key]) { e.preventDefault(); grade(KEYS[e.key]); }
-  else if (e.key === 'ArrowRight') { i = Math.min(i + 1, queue.length - 1); render(); }
-  else if (e.key === 'ArrowLeft')  { i = Math.max(i - 1, 0); render(); }
+  else if (e.key === 'ArrowRight' || e.key === 's') { e.preventDefault(); skipItem(); }
+  else if (e.key === 'ArrowLeft')                   { e.preventDefault(); prevItem(); }
 });
 for (const b of document.querySelectorAll('button[data-v]'))
   b.onclick = () => grade(b.dataset.v);
