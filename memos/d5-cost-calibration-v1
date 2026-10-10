@@ -1,0 +1,72 @@
+# The D5 cost gate — what the scores actually look like (2026-10-10)
+
+A probe of `d5_cost_proportional` on the live agent (cut 0.5, `$1` materiality
+floor), prompted by the question "are the new cuts reasonable?". D5 is post-price:
+it only runs once the door has a cost, so a sample exists only for requests that
+reach `proceed`. This memo is the record of that reading; it changes no code.
+
+## Method
+
+Sent well-specified, in-remit requests to `data-sourcing-agent` chosen to vary
+**estimate vs budget**, then read the D5 answer and cut back out of
+`gate-log.jsonl`. Requests that stopped earlier (on D2/D3) never produced a D5 row
+and are excluded — that is a D2 finding, recorded at the bottom.
+
+## The samples
+
+| Request | estimate | budget/cap | est as % of cap | D5 | door |
+|---|---:|---:|---:|:---:|---|
+| OPRA ohlcv-1d SPY, budget $50 | $1.12 | $50 | 2% | 0.55 | proceed |
+| OPRA cmbp-1 SPY, no cap | $288 | $300¹ | 96% | 0.59 | proceed |
+| GLBX mbp-10 ES, 1 mo, budget $5000 | $40.57 | $5000 | 0.8% | 0.70 | proceed |
+| GLBX mbp-10 ES, 9 mo, budget $5000 | $432 | $5000 | 8.6% | 0.61 | proceed |
+| GLBX trades ALL, 1 mo, budget $5000 | $140 | $5000 | 2.8% | 0.59 | proceed |
+| GLBX mbp-10 ES, 1 mo, no cap | $40.57 | $45¹ | 90% | 0.51 | proceed |
+| **GLBX mbp-10 ES, 1 mo, budget $10** | $40.57 | $10 | **406%** | **0.48** | **ask** |
+
+¹ No budget stated: the agent sets its own ceiling, so "cap" is the ticket's
+`max_usd`, not a number the requester chose.
+
+## Finding
+
+**D5 separates only at gross overrun, and its margin is thin everywhere else.**
+
+- The one request that blows its budget (4× over, $10 against a $40.57 estimate) is
+  the *only* one that fails, at **0.48**. So D5 catches the case it exists to catch.
+- Every request *within* budget scores in a **0.51–0.70** band — all within 0.20 of
+  the 0.5 cut, three within 0.09. The no-budget case (estimate at 90% of the agent's
+  own ceiling) sits at **0.51**, effectively on the line; a 0.03 gap separates the
+  $10-budget ask (0.48) from the no-cap proceed (0.51) on otherwise-identical input.
+- **It is not a clean function of cost.** The 0.8%-of-cap case (0.70) scores *higher*
+  than the 2.8% case (0.59); the 96%-of-cap case (0.59) outscores the 90% case
+  (0.51). Jev is returning a judgement that merely clusters just above the cut, not
+  pricing the ratio.
+
+**So at cut 0.5, D5 means: "stop gross overruns, pass everything else."** That is a
+reasonable policy — a ticket is draft-only, requires human sign-off, and the
+deterministic validator already prices against the real API — but it is worth
+adopting *as the policy*, not treating the 0.5 as a calibrated boundary between
+"proportional" and "not". The scores are not separated enough to trust a cut in the
+0.55–0.65 region without more over-budget samples.
+
+## Recommendation
+
+- **Keep D5 at 0.5.** Record the policy explicitly: D5 stops gross overruns only.
+- To tune it further, collect **more deliberately over-budget samples** (like the $10
+  one) — that is the only region where the signal separates from noise. Everything
+  within budget is one undifferentiated band.
+- Do **not** raise the cut to catch the marginal in-budget cases (e.g. the
+  $288-at-96%-of-cap proceed at 0.59): the band is too noisy for that to be a
+  reliable false-accept/false-reject trade rather than a coin-flip.
+
+## Adjacent finding — D2/D3 collapse on invalid-schema substitutions
+
+The probe also (incidentally) showed the front door is the *bigger* reliability
+wrinkle on this input class. Three well-specified OPRA mbp-10 requests were stopped
+**not on cost** but on **D2 = 0.35 / 0.13 / 0.03** with **D3 = 1.07 / 1.10 / 0.84**
+(both under their cuts, so D5 never ran). Earlier, essentially the same request
+("OPRA.PILLAR mbp-10, SPY.OPT, September") scored **D2 0.88 / D3 2.90 and
+proceeded**. So D2 swings from 0.88 to 0.03 on nearly identical text on the
+OPRA-mbp-10 shape (a schema OPRA.PILLAR does not offer, forcing a cmbp-1
+substitution). Lowering D2's cut from 0.91 to 0.5 does not help when the answer is
+0.03 — this is a *signal* problem, not a *cut* problem, and is left open here.
