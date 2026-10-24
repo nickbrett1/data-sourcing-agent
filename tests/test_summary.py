@@ -93,10 +93,29 @@ def test_time_is_a_backstop_only_when_there_is_material():
     assert summary["refreeze_due"] is True
 
 
-def test_no_armed_cut_is_called_out():
-    summary = build_summary(grades=_grades(right=30), samples=_samples(40), cut=None, now=NOW)
-    assert any("provisional" in issue for issue in summary["issues"])
+def test_an_unarmable_cut_is_a_note_not_a_warning():
+    """Below the floor the cut cannot arm. Nothing is wrong and nothing can be done,
+    so it is reported — but it must not page, because that alert can never be cleared."""
+    summary = build_summary(
+        grades=_grades(right=30), samples=_samples(40), cut=None, scores=[0.9, 0.1], now=NOW
+    )
     assert summary["cut_armed"] is False
+    assert any("provisional" in note for note in summary["notes"])
+    assert not any("provisional" in issue for issue in summary["issues"])
+    assert summary["status"] == "ok"
+
+
+def test_a_cut_that_could_have_armed_but_did_not_is_drift():
+    """At or above the floor a refresh was possible, so its absence is a real fault."""
+    summary = build_summary(
+        grades=_grades(right=30),
+        samples=_samples(40),
+        cut=None,
+        scores=[0.9] * 50,
+        now=NOW,
+    )
+    assert any("no armed cutoff" in issue for issue in summary["issues"])
+    assert summary["status"] == "warn"
 
 
 def test_grades_point_the_direction_the_cut_should_move():

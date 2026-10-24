@@ -91,7 +91,13 @@ def build_summary(
         counts[grade.verdict] += 1
     strict, lenient = counts[Verdict.too_strict], counts[Verdict.too_lenient]
 
+    # `issues` drive the status (and therefore the alert); `notes` are true
+    # statements that are not actionable, and must not page. A cut that cannot be
+    # armed yet is the clearest case: the log is still filling, so every daily run
+    # would say the same thing until traffic arrives — an alert nobody can clear by
+    # doing anything. It stays visible in the payload, but it is not drift.
     issues: list[str] = []
+    notes: list[str] = []
     if graded < MIN_GRADES:
         issues.append(f"only {graded} graded; need {MIN_GRADES} before the grades speak")
 
@@ -112,12 +118,19 @@ def build_summary(
     # act only when there is a graded entry it would actually consume.
     if unarmed:
         refreeze_due = len(scores) >= DEFAULT_MIN_N
-    else:
-        refreeze_due = unused_graded > 0 and (bucket_full or overdue)
-
-    if unarmed:
-        issues.append("no armed cutoff; enforcing the provisional probability cut")
+        # Two different facts wear the same words. Below the floor, the cut *cannot*
+        # arm: nothing is wrong, the log is still filling, and no action exists that
+        # would change it today. At or above the floor, a refresh was possible and
+        # did not happen — that is drift, and it pages.
+        measured = f"{len(scores)}/{DEFAULT_MIN_N} D2 scores"
+        if refreeze_due:
+            issues.append(f"no armed cutoff: {measured}, so a re-freeze is overdue")
+        else:
+            notes.append(
+                f"no armed cutoff ({measured}): enforcing the provisional probability cut"
+            )
     elif bucket_full:
+        refreeze_due = unused_graded > 0
         if unused_graded >= BUCKET_SIZE:
             issues.append(
                 f"re-freeze due: {unused_graded} graded since the last freeze "
@@ -129,7 +142,10 @@ def build_summary(
                 f">= bucket {BUCKET_SIZE}; grade them to fill the next freeze"
             )
     elif overdue:
+        refreeze_due = True
         issues.append(f"re-freeze overdue: cut is {age:.0f}h old with {unused_graded} graded unconsumed")
+    else:
+        refreeze_due = False
 
     # (2) the grades name a direction the cut has not moved in.
     imbalance = abs(strict - lenient)
@@ -158,6 +174,7 @@ def build_summary(
         "refreeze_due": refreeze_due,
         "issues": issues,
         "issue": issues[0] if issues else "in sync",
+        "notes": notes,
     }
 
 
@@ -180,6 +197,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps(summary, indent=2))
     else:
         print(f"{summary['status']}: {summary['issue']}")
+        for note in summary["notes"]:
+            print(f"  note: {note}")
         for issue in summary["issues"][1:]:
             print(f"  - {issue}")
     if args.check and summary["status"] != "ok":
