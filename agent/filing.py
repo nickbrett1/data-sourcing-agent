@@ -154,7 +154,9 @@ async def file_ticket(ticket: Ticket, *, turn_id: str | None = None) -> Ticket:
             result = await client.call_tool(SUBMIT_TOOL, arguments)
     except Exception as exc:  # transport, handshake, or the tool's own failure
         raise FilingRefused(f"could not file the request: {exc}") from exc
-    if getattr(result, "is_error", False) or getattr(result, "isError", False):
+    # `is_error`, not `isError`: mcp 2.x renamed the field and reading the old
+    # spelling logs a deprecation warning on every filing. The pin is `mcp>=2`.
+    if getattr(result, "is_error", False):
         raise FilingRefused(_error_text(result))
     return ticket.model_copy(update={"request_id": _row_id(result)})
 

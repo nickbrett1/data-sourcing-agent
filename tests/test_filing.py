@@ -69,12 +69,7 @@ class _FakeClient:
 
 
 def _result(**structured):
-    return SimpleNamespace(
-        structured_content=structured,
-        content=[],
-        is_error=None,
-        isError=None,
-    )
+    return SimpleNamespace(structured_content=structured, content=[], is_error=False)
 
 
 def test_the_body_is_the_tickets_own_fields_and_not_the_models():
@@ -160,10 +155,7 @@ def test_a_refusal_is_raised_with_the_runtimes_own_words(monkeypatch):
         "does not carry schema 'ohlcv-1m'"
     )
     _FakeClient.answer = SimpleNamespace(
-        structured_content=None,
-        content=[SimpleNamespace(text=refusal)],
-        is_error=True,
-        isError=True,
+        structured_content=None, content=[SimpleNamespace(text=refusal)], is_error=True
     )
     monkeypatch.setattr("agent.filing.Client", _FakeClient)
 
