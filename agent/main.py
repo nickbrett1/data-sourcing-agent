@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -45,6 +46,7 @@ from starlette.routing import Route
 from agent.card import AGENT_SKILLS, build_agent_card
 from agent.contract import validate_agent_result
 from agent.cutoff import resolve_policy
+from agent.filing import MCP_URL, SUBMIT_TOOL, file_ticket
 from agent.gate import (
     DEFAULT_POLICY as _BASE_POLICY,
 )
@@ -146,16 +148,28 @@ def _load_instructions() -> str:
     """
     if INSTRUCTIONS_PATH.exists():
         return INSTRUCTIONS_PATH.read_text(encoding="utf-8")
-    return "You are the front desk for Databento historical downloads. Turn a human's intent into a draft download ticket. You never mark a ticket approved, never raise cost.max_usd, and never declare a request valid or a cost known - the deterministic Validator asks the Databento API, and only a human signs off on spend. You may file a draft with submit_request; filing costs nothing and still waits for a human. Never say a request is approved, running or bought, and never claim to have approved anything. `stype_in` is one of raw_symbol, parent, continuous, instrument_id, and you must not guess it. `why` is mandatory."
+    return "You are the front desk for Databento historical downloads. Turn a human's intent into a draft download ticket. You never mark a ticket approved, never raise cost.max_usd, and never declare a request valid or a cost known - the deterministic Validator asks the Databento API, and only a human signs off on spend. You do not file the request: the runtime files the ticket you propose once it has validated it, so produce the ticket and stop. Never say a request is approved, running or bought, and never claim to have approved anything. `stype_in` is one of raw_symbol, parent, continuous, instrument_id, and you must not guess it. `why` is mandatory."
+
+
+def _model_may_not_file(_ctx, tool) -> bool:
+    """Keep the one write off the model's toolset (see `agent/filing.py`).
+
+    The model gets the whole `data-sourcing` group *except* `submit_request`:
+    discovery, the price, and the book — everything needed to construct a good
+    draft — but not the pen. Filing happens in `file_ticket` from the validated
+    `Ticket`, so a body cannot reach the runtime from inside the loop, before or
+    between validation attempts.
+    """
+    return tool.name != SUBMIT_TOOL
 
 
 AGENT_TOOLSETS = [
     # The mcphub `data-sourcing` group, not a single server: one toolset carries
-    # the request book (data-download: list_requests, get_request, whats_landed,
-    # list_plan_types, quote, submit_request) AND discovery (databento-discovery).
-    # It is a dedicated group: the shared `data` group no longer exposes
-    # submit_request, so this agent must not consume it.
-    MCPToolset("http://mcphub:3000/mcp/data-sourcing"),
+    # the request book (data-download) AND discovery (databento-discovery), which
+    # is why the group exists at all. `submit_request` is filtered out — the
+    # write is made by `agent/filing.py` after the Validator has priced the
+    # ticket, never by the model mid-loop.
+    MCPToolset(MCP_URL).filtered(_model_may_not_file),
 ]
 
 agent = Agent(
@@ -230,6 +244,7 @@ class TicketAgentExecutor(AgentExecutor):
         roost_bridge: RoostBridge | None = None,
         interpreter: Agent | None = None,
         jev: JevClient | None = None,
+        filer: Callable[[Ticket, str | None], Awaitable[Ticket]] | None = None,
     ):
         self._agent = agent
         # The fleet hub. A no-op bridge when roost is unconfigured, so this
@@ -240,6 +255,11 @@ class TicketAgentExecutor(AgentExecutor):
         # without a model or a gateway.
         self._interpreter = interpreter
         self._jev = jev
+        # The filing step (agent/filing.py). Injectable for the same reason the
+        # interpreter and the gate are: a test drives a whole turn without a
+        # runtime to file against, and a stub filer keeps the *order* under test
+        # without standing up mcphub.
+        self._filer = filer or file_ticket
 
     async def _assess(
         self, user_input: str, request_id: str
@@ -359,6 +379,10 @@ class TicketAgentExecutor(AgentExecutor):
         hiccup once (`exceeded max retries count of 1`) and lose the whole sample —
         the one failure this path exists to prevent. A second attempt is cheap (a
         draft spends nothing) and lets a transient tool or model fault clear.
+
+        This agent's toolset has `submit_request` filtered out, so a shadow
+        generation cannot file a row even if the model tried: a stopped turn stays
+        a stopped turn, and the sample stays evidence rather than a product.
         """
         prompt = ticket_prompt(user_input, intent) if intent is not None else user_input
         attempts = 2
@@ -477,6 +501,16 @@ class TicketAgentExecutor(AgentExecutor):
                 append_sample(request_id, user_input, rendered)
                 await updater.complete(updater.new_agent_message([new_text_part(stopped)]))
                 return
+            # The door's own step, and the only one that creates a row: the ticket
+            # the Validator just priced is filed as it stands (agent/filing.py).
+            # Inside the `try`, deliberately — a runtime that refuses the body has
+            # said something a human needs to read, and a ticket that is not in
+            # the book is not the product. Filing before validation would be the
+            # other order, and the reason this is code rather than a tool.
+            ticket = await self._filer(ticket, turn_id=request_id)
+            # Re-render: the ticket now carries the row's id, and the artifact a
+            # human reads should name what actually exists.
+            rendered = render_ticket_yaml(ticket)
         except Exception as exc:  # a failed turn is a failed task, not a crash
             self._label(request_id, Outcome.run_failed, note=str(exc)[:200])
             await updater.failed(
@@ -492,10 +526,10 @@ class TicketAgentExecutor(AgentExecutor):
         # stopped request has no artifact to judge — "Jev said stop" is not, alone,
         # right or wrong (agent/samples.py). Drafts spend nothing, so this is free.
         append_sample(request_id, user_input, rendered)
-        # The durable artifact: the draft lands in the book's inbox/ and nowhere
-        # else (design memo data-request-book-v1 §4). Only on the success path —
-        # a door-stopped turn is not a draft awaiting approval and must not file
-        # one. Best-effort, but logged.
+        # The durable artifact: the ticket lands in the book's inbox/ as well as in
+        # the runtime's request table (the row was filed above, from the validated
+        # ticket). Only on the success path — a door-stopped turn is not a draft
+        # awaiting approval and must not file one. Best-effort, but logged.
         self._file_draft(ticket, request_id)
         # The only label the agent can write with certainty: a ticket exists. Whether
         # it was any good is a human's call, logged later from outside (§6.5.1).

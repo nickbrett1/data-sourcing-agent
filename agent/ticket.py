@@ -141,6 +141,11 @@ class Ticket(BaseModel):
     request: RequestSpec
     cost: TicketCost
     why: str
+    # The row this ticket became. Set by `agent/filing.py` *after* the Validator
+    # has spoken, never by the model and never before filing: a ticket that
+    # carries an id is a ticket whose body reached the runtime, and the two
+    # facts must not be able to disagree.
+    request_id: str | None = None
 
 
 def render_ticket_yaml(ticket: Ticket) -> str:
@@ -156,6 +161,8 @@ def render_ticket_yaml(ticket: Ticket) -> str:
     ]
     if ticket.group is not None:
         lines.append(f"group: {ticket.group}")
+    if ticket.request_id is not None:
+        lines.append(f"request_id: {ticket.request_id}")
     lines += [
         "request:",
         f"  dataset: {request.dataset}",

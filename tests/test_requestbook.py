@@ -105,7 +105,7 @@ def _stub_agent():
     return _Stub()
 
 
-def test_a_completed_turn_files_the_draft_into_the_inbox(tmp_path, monkeypatch):
+def test_a_completed_turn_files_the_draft_into_the_inbox(tmp_path, monkeypatch, stub_filer):
     from a2a.helpers.proto_helpers import new_text_part
     from a2a.types.a2a_pb2 import Message, Role, SendMessageRequest
     from google.protobuf.json_format import MessageToDict
@@ -119,7 +119,8 @@ def test_a_completed_turn_files_the_draft_into_the_inbox(tmp_path, monkeypatch):
 
     stub = _stub_agent()
     app = main.create_app(
-        agent_executor=main.TicketAgentExecutor(stub), agent_instance=stub
+        agent_executor=main.TicketAgentExecutor(stub, filer=stub_filer),
+        agent_instance=stub,
     )
     params = MessageToDict(
         SendMessageRequest(
@@ -138,4 +139,8 @@ def test_a_completed_turn_files_the_draft_into_the_inbox(tmp_path, monkeypatch):
     assert response.status_code == 200
     drafts = list(inbox.glob("*.yaml"))
     assert len(drafts) == 1
-    assert "state: draft" in drafts[0].read_text()
+    text = drafts[0].read_text()
+    assert "state: draft" in text
+    # The ticket in the inbox names the row the runtime created from it: the
+    # filing is what happened to *this* ticket, not a second, unrelated request.
+    assert "request_id: req_" in text

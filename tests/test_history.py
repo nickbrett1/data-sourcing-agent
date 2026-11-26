@@ -283,7 +283,7 @@ class _StubAgent:
         return _Result()
 
 
-def test_a_turn_through_the_app_is_readable_as_history(tmp_path):
+def test_a_turn_through_the_app_is_readable_as_history(tmp_path, stub_filer):
     """End to end: send a real A2A message, then read it back as a session.
 
     This is the claim the whole change rests on - the transcript roost reads is
@@ -295,7 +295,9 @@ def test_a_turn_through_the_app_is_readable_as_history(tmp_path):
 
     stub = _StubAgent()
     app = main.create_app(
-        agent_executor=main.TicketAgentExecutor(stub, main.RoostBridge()),
+        agent_executor=main.TicketAgentExecutor(
+            stub, main.RoostBridge(), filer=stub_filer
+        ),
         agent_instance=stub,
         task_store=store,
     )

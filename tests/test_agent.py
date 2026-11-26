@@ -348,7 +348,7 @@ def test_greeting_over_v03_message_send_completes_without_an_artifact():
     assert result["status"]["message"]["parts"][0]["kind"] == "text"
 
 
-def test_data_request_still_yields_the_ticket_artifact():
+def test_data_request_still_yields_the_ticket_artifact(stub_filer):
     """A real request is untouched: it still produces the rendered ticket.
 
     The other half of the fix. Without this, a pre-check that rejected
@@ -370,7 +370,7 @@ def test_data_request_still_yields_the_ticket_artifact():
     )
     body = {"jsonrpc": "2.0", "id": "1", "method": "SendMessage", "params": params}
 
-    with TestClient(_app_with_stub()) as client:
+    with TestClient(_app_with_stub(stub_filer)) as client:
         response = client.post("/", json=body, headers={"A2A-Version": "1.0"})
 
     task = response.json()["result"]["task"]
@@ -402,12 +402,13 @@ def _stub_agent():
     return _Stub()
 
 
-def _app_with_stub():
+def _app_with_stub(filer=None):
     from agent import main
 
     stub = _stub_agent()
     return main.create_app(
-        agent_executor=main.TicketAgentExecutor(stub), agent_instance=stub
+        agent_executor=main.TicketAgentExecutor(stub, filer=filer),
+        agent_instance=stub,
     )
 
 
@@ -433,7 +434,7 @@ def test_served_card_declares_the_wire_the_server_speaks():
     assert main.PROTOCOL_VERSION == "1.0"
 
 
-def test_native_send_message_returns_a_completed_task():
+def test_native_send_message_returns_a_completed_task(stub_filer):
     """The a2a-sdk 1.0 request the gateway sends must return a task, not an error.
 
     This is the transport the gateway selects once the card advertises 1.0: a
@@ -456,7 +457,7 @@ def test_native_send_message_returns_a_completed_task():
     )
     body = {"jsonrpc": "2.0", "id": "1", "method": "SendMessage", "params": params}
 
-    with TestClient(_app_with_stub()) as client:
+    with TestClient(_app_with_stub(stub_filer)) as client:
         response = client.post("/", json=body, headers={"A2A-Version": "1.0"})
 
     assert response.status_code == 200
@@ -466,7 +467,7 @@ def test_native_send_message_returns_a_completed_task():
     assert any("state: draft" in t for t in texts)
 
 
-def test_v03_message_send_gateway_shape_is_accepted():
+def test_v03_message_send_gateway_shape_is_accepted(stub_filer):
     """The legacy `message/send` payload the gateway currently sends must work.
 
     The v0.3 adapter is enabled on the same endpoint, so a caller that reads the
@@ -491,7 +492,7 @@ def test_v03_message_send_gateway_shape_is_accepted():
         "params": params.model_dump(by_alias=True, exclude_none=True),
     }
 
-    with TestClient(_app_with_stub()) as client:
+    with TestClient(_app_with_stub(stub_filer)) as client:
         response = client.post("/", json=body)
 
     assert response.status_code == 200
@@ -499,7 +500,7 @@ def test_v03_message_send_gateway_shape_is_accepted():
     assert "result" in response.json()
 
 
-def test_request_headers_reach_the_litellm_forwarder():
+def test_request_headers_reach_the_litellm_forwarder(stub_filer):
     """Inbound `x-litellm-*` headers must reach `current_litellm_headers()`.
 
     The gateway stamps its calls with trace/agent headers, and the agent's own
@@ -539,7 +540,8 @@ def test_request_headers_reach_the_litellm_forwarder():
 
     stub = _RecordingAgent()
     app = main.create_app(
-        agent_executor=main.TicketAgentExecutor(stub), agent_instance=stub
+        agent_executor=main.TicketAgentExecutor(stub, filer=stub_filer),
+        agent_instance=stub,
     )
     params = MessageToDict(
         SendMessageRequest(
