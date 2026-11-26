@@ -289,7 +289,7 @@ class _FlakyAgent:
 def test_a_transient_shadow_failure_is_retried(tmp_path, monkeypatch):
     """A stopped request must keep its artifact even if the first run hiccups.
 
-    Observed live: the discovery MCP tool exhausted its retry budget and the whole
+    Observed live: the data-group MCP tool exhausted its retry budget and the whole
     sample was lost. One more attempt recovers it.
     """
     monkeypatch.setenv("GATE_SAMPLE_PATH", str(tmp_path / "samples.jsonl"))
