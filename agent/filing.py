@@ -45,9 +45,11 @@ from mcp import Client
 
 from agent.ticket import Ticket
 
-# Where the group lives. `data-sourcing`, not `data`: the shared read group does
-# not carry the write at all, so this URL is the only one that can file.
-MCP_URL = os.environ.get("DATA_SOURCING_MCP_URL", "http://mcphub:3000/mcp/data-sourcing")
+# Where the group lives: mcphub's `data` group, which carries discovery, the
+# request book and the write in one toolset. (It was `data-sourcing` until the
+# two groups were collapsed; a strictly read-only twin bought nothing, because
+# the gate is this module, not which endpoint a client was given.)
+MCP_URL = os.environ.get("DATA_SOURCING_MCP_URL", "http://mcphub:3000/mcp/data")
 
 # The tool as mcphub presents it: prefixed with its server name.
 SUBMIT_TOOL = "data-download-submit_request"

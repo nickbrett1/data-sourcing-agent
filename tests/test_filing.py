@@ -224,7 +224,7 @@ def test_every_toolset_the_agent_holds_is_filtered():
 
 
 def test_the_filing_url_is_the_group_that_carries_the_write():
-    """`data-sourcing`, not the shared `data` read group: the latter does not
-    expose `submit_request` at all, so filing against it would fail at run time
-    with a tool-not-found that looks like a bug in this module."""
-    assert MCP_URL.endswith("/data-sourcing")
+    """mcphub's one `data` group: discovery, the book and the write in one
+    toolset. Filing against a group without `submit_request` would fail at run
+    time with a tool-not-found that looks like a bug in this module."""
+    assert MCP_URL.endswith("/mcp/data")

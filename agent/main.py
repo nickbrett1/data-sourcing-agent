@@ -154,7 +154,7 @@ def _load_instructions() -> str:
 def _model_may_not_file(_ctx, tool) -> bool:
     """Keep the one write off the model's toolset (see `agent/filing.py`).
 
-    The model gets the whole `data-sourcing` group *except* `submit_request`:
+    The model gets the whole `data` group *except* `submit_request`:
     discovery, the price, and the book — everything needed to construct a good
     draft — but not the pen. Filing happens in `file_ticket` from the validated
     `Ticket`, so a body cannot reach the runtime from inside the loop, before or
@@ -164,11 +164,11 @@ def _model_may_not_file(_ctx, tool) -> bool:
 
 
 AGENT_TOOLSETS = [
-    # The mcphub `data-sourcing` group, not a single server: one toolset carries
-    # the request book (data-download) AND discovery (databento-discovery), which
-    # is why the group exists at all. `submit_request` is filtered out — the
-    # write is made by `agent/filing.py` after the Validator has priced the
-    # ticket, never by the model mid-loop.
+    # The mcphub `data` group, not a single server: one toolset carries the
+    # request book (data-download) AND discovery (databento-discovery), which is
+    # why the group exists at all. `submit_request` is filtered out — the write
+    # is made by `agent/filing.py` after the Validator has priced the ticket,
+    # never by the model mid-loop.
     MCPToolset(MCP_URL).filtered(_model_may_not_file),
 ]
 
@@ -201,7 +201,7 @@ agent.output_validator(validate_agent_result)
 
 # The interpretation step, pulled out of the run so the gate can sit after it
 # (memo `jev-integration-v1` §3.1; decided 2026-10-06). It shares the gateway
-# model and the data-sourcing-group toolset with the ticket run.
+# model and the `data` group's toolset with the ticket run.
 interpreter = build_interpreter(build_model(), toolsets=AGENT_TOOLSETS)
 # The Jev client, reached through the proxy's native `/typesafe` route. Held here
 # (not in the Validator) — the boundary rule the gate tests enforce.
@@ -375,7 +375,7 @@ class TicketAgentExecutor(AgentExecutor):
         nothing (§grading-sample-v1). Best-effort: a failure here is logged, never
         raised — the turn is already being stopped on purpose.
 
-        The run is attempted twice. The data-sourcing-group MCP toolset has been observed to
+        The run is attempted twice. The `data` group's MCP toolset has been observed to
         hiccup once (`exceeded max retries count of 1`) and lose the whole sample —
         the one failure this path exists to prevent. A second attempt is cheap (a
         draft spends nothing) and lets a transient tool or model fault clear.
