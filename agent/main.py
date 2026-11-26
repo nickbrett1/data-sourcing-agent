@@ -150,10 +150,12 @@ def _load_instructions() -> str:
 
 
 AGENT_TOOLSETS = [
-    # The mcphub `data` group, not a single server: one toolset now carries
-    # discovery (search/describe/cost) AND the request book (list_requests,
-    # get_request, whats_landed, list_plan_types, quote, submit_request).
-    MCPToolset("http://mcphub:3000/mcp/data"),
+    # The mcphub `data-sourcing` group, not a single server: one toolset carries
+    # the request book (data-download: list_requests, get_request, whats_landed,
+    # list_plan_types, quote, submit_request) AND discovery (databento-discovery).
+    # It is a dedicated group: the shared `data` group no longer exposes
+    # submit_request, so this agent must not consume it.
+    MCPToolset("http://mcphub:3000/mcp/data-sourcing"),
 ]
 
 agent = Agent(
@@ -185,7 +187,7 @@ agent.output_validator(validate_agent_result)
 
 # The interpretation step, pulled out of the run so the gate can sit after it
 # (memo `jev-integration-v1` §3.1; decided 2026-10-06). It shares the gateway
-# model and the data-group toolset with the ticket run.
+# model and the data-sourcing-group toolset with the ticket run.
 interpreter = build_interpreter(build_model(), toolsets=AGENT_TOOLSETS)
 # The Jev client, reached through the proxy's native `/typesafe` route. Held here
 # (not in the Validator) — the boundary rule the gate tests enforce.
@@ -353,7 +355,7 @@ class TicketAgentExecutor(AgentExecutor):
         nothing (§grading-sample-v1). Best-effort: a failure here is logged, never
         raised — the turn is already being stopped on purpose.
 
-        The run is attempted twice. The data-group MCP toolset has been observed to
+        The run is attempted twice. The data-sourcing-group MCP toolset has been observed to
         hiccup once (`exceeded max retries count of 1`) and lose the whole sample —
         the one failure this path exists to prevent. A second attempt is cheap (a
         draft spends nothing) and lets a transient tool or model fault clear.

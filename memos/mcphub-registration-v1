@@ -84,3 +84,15 @@ Verified state: image `:latest` = `:aefaa5ae` = `8a685596dbc1`; container
 now `[databento-discovery, memos, data-sourcing-gate-grader]`. `GATE_ENFORCE` is still blank, so the
 gate deployed observe-only — as intended. Rollout log:
 `/volumeUSB1/usbshare/docker/data-sourcing-agent/ROLLOUT-PROGRESS-20261006.md`.
+
+## Update (2026-11-26): the agent no longer consumes the shared `data` group
+
+The verification snapshot above is historical. mcphub has since given this agent
+its own **`data-sourcing`** group, and `agent/main.py` now builds its toolset
+against `http://mcphub:3000/mcp/data-sourcing`. The shared `data` group is losing
+the `submit_request` tool (filing is a sourcing-agent capability), so the group
+membership quoted above — and the agent's use of it — is stale. `data-sourcing`
+carries `data-download` with all six tools (`list_requests`, `get_request`,
+`whats_landed`, `list_plan_types`, `quote`, `submit_request`) plus
+`databento-discovery`. The registration steps themselves are unchanged; only the
+group name (and its id) differs.

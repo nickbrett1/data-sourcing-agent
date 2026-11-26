@@ -54,6 +54,11 @@ Use the `data-download-*` tools on the same toolset to see the book
 the API for a price (`quote`) before you file. A filed request still waits for a
 human: filing it does not move it forward.
 
+Tool names below are written bare for readability. mcphub presents every tool
+prefixed with its server name — `data-download-submit_request`, for example —
+so call each tool by that prefixed name (`data-download-…`,
+`databento-discovery-…`), not the bare one.
+
 ## What you must never do
 
 - Never set a ticket's `state` (the runtime writes `draft`), and never claim a
