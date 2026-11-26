@@ -146,11 +146,14 @@ def _load_instructions() -> str:
     """
     if INSTRUCTIONS_PATH.exists():
         return INSTRUCTIONS_PATH.read_text(encoding="utf-8")
-    return "You are the front desk for Databento historical downloads. Turn a human's intent into a draft download ticket. You never mark a ticket approved, never raise cost.max_usd, and never declare a request valid or a cost known - the deterministic Validator asks the Databento API, and only a human signs off on spend. `stype_in` is one of raw_symbol, parent, continuous, instrument_id, and you must not guess it. `why` is mandatory."
+    return "You are the front desk for Databento historical downloads. Turn a human's intent into a draft download ticket. You never mark a ticket approved, never raise cost.max_usd, and never declare a request valid or a cost known - the deterministic Validator asks the Databento API, and only a human signs off on spend. You may file a draft with submit_request; filing costs nothing and still waits for a human. Never say a request is approved, running or bought, and never claim to have approved anything. `stype_in` is one of raw_symbol, parent, continuous, instrument_id, and you must not guess it. `why` is mandatory."
 
 
 AGENT_TOOLSETS = [
-    MCPToolset("http://mcphub:3000/mcp/databento-discovery"),
+    # The mcphub `data` group, not a single server: one toolset now carries
+    # discovery (search/describe/cost) AND the request book (list_requests,
+    # get_request, whats_landed, list_plan_types, quote, submit_request).
+    MCPToolset("http://mcphub:3000/mcp/data"),
 ]
 
 agent = Agent(
@@ -169,7 +172,7 @@ agent = Agent(
     model_settings=ModelSettings(max_tokens=4096),
     # `tools: 3`, not the default 1: an MCP tool call that fails gets one retry
     # before the run dies with `UnexpectedModelBehavior(... exceeded max retries
-    # count of 1)`. Observed live on the shadow-generation path — the discovery
+    # count of 1)`. Observed live on the shadow-generation path — the MCP
     # toolset hiccupped and the whole stopped-request sample was lost. Two more
     # attempts lets the model see the tool's error and correct the call, which is
     # exactly what the retry budget is for.
@@ -182,7 +185,7 @@ agent.output_validator(validate_agent_result)
 
 # The interpretation step, pulled out of the run so the gate can sit after it
 # (memo `jev-integration-v1` §3.1; decided 2026-10-06). It shares the gateway
-# model and the discovery toolset with the ticket run.
+# model and the data-group toolset with the ticket run.
 interpreter = build_interpreter(build_model(), toolsets=AGENT_TOOLSETS)
 # The Jev client, reached through the proxy's native `/typesafe` route. Held here
 # (not in the Validator) — the boundary rule the gate tests enforce.
@@ -350,7 +353,7 @@ class TicketAgentExecutor(AgentExecutor):
         nothing (§grading-sample-v1). Best-effort: a failure here is logged, never
         raised — the turn is already being stopped on purpose.
 
-        The run is attempted twice. The discovery MCP toolset has been observed to
+        The run is attempted twice. The data-group MCP toolset has been observed to
         hiccup once (`exceeded max retries count of 1`) and lose the whole sample —
         the one failure this path exists to prevent. A second attempt is cheap (a
         draft spends nothing) and lets a transient tool or model fault clear.
